@@ -39,7 +39,7 @@ from ..core.config import AgentMode
 from .security import SECURITY_HEADERS, SecurityManager, Session
 from .state import Runtime
 
-API_VERSION = "1.6.0"
+API_VERSION = "1.7.0"
 
 
 class LoginRequest(BaseModel):
@@ -119,6 +119,36 @@ class JevLabel(BaseModel):
 
 class JevLabels(BaseModel):
     labels: List[JevLabel] = Field(min_length=1, max_length=100)
+
+
+class BrainSave(BaseModel):
+    #: Fields of the `brain` configuration section; `stress_scenarios`, when
+    #: sent, replaces the stored table.
+    patch: Dict[str, Any] = Field(max_length=60)
+
+
+class BrainModelRef(BaseModel):
+    model_id: str = Field(min_length=4, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+
+
+class BrainCooldownRef(BaseModel):
+    scope: str = Field(min_length=1, max_length=64)
+
+
+class NotifyChannelSave(BaseModel):
+    channel: str = Field(pattern=r"^(telegram|bale)$")
+    enabled: bool = False
+    #: None keeps the stored chat id; "" clears it.
+    chat_id: Optional[str] = Field(default=None, max_length=40)
+    categories: Optional[List[str]] = Field(default=None, max_length=10)
+    commands: bool = False
+    #: None keeps the stored token; "" deletes it.
+    token: Optional[str] = Field(default=None, max_length=120)
+    daily_hour_utc: Optional[int] = Field(default=None, ge=0, le=23)
+
+
+class NotifyChannelRef(BaseModel):
+    channel: str = Field(pattern=r"^(telegram|bale)$")
 
 
 class ReferenceSave(BaseModel):
@@ -1139,6 +1169,106 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         report = desk.refresh_calendar(now)
         desk.refresh_feeds(now)
         return {"calendar": report, "desk": desk.status.to_dict()}
+
+    # -- the brain ------------------------------------------------------------ #
+
+    def _brain_or_409():
+        brain = getattr(runtime, "brain", None)
+        if brain is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "the brain is not wired in this build")
+        return brain
+
+    @app.get("/api/brain")
+    def brain_overview(session: Session = Depends(current_session)):
+        return runtime.brain_view()
+
+    @app.post("/api/brain/settings")
+    def brain_settings(body: BrainSave,
+                       session: Session = Depends(require_write("brain_settings",
+                                                                requires_owner=True))):
+        _brain_or_409()
+        try:
+            result = runtime.update_config({"brain": body.patch}, session.username,
+                                           replace={("brain", "stress_scenarios")})
+        except Exception as exc:  # noqa: BLE001 - validation errors are user errors
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:400])
+        return {**result, "brain": runtime.brain_view()}
+
+    @app.post("/api/brain/lab/run")
+    def brain_lab_run(session: Session = Depends(require_write("brain_lab",
+                                                               requires_owner=True))):
+        brain = _brain_or_409()
+        if not brain.start_lab(by=session.username):
+            raise HTTPException(status.HTTP_409_CONFLICT, "the lab is already running")
+        return {"started": True}
+
+    @app.post("/api/brain/model/approve")
+    def brain_model_approve(body: BrainModelRef,
+                            session: Session = Depends(require_write("brain_model",
+                                                                     requires_owner=True))):
+        try:
+            return _brain_or_409().approve_model(body.model_id, session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:300])
+
+    @app.post("/api/brain/model/retire")
+    def brain_model_retire(session: Session = Depends(require_write("brain_model",
+                                                                    requires_owner=True))):
+        try:
+            return _brain_or_409().retire_model(session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:300])
+
+    @app.post("/api/brain/cooldown/clear")
+    def brain_cooldown_clear(body: BrainCooldownRef,
+                             session: Session = Depends(require_write("brain_cooldown",
+                                                                      requires_owner=True))):
+        try:
+            return _brain_or_409().clear_cooldown(body.scope, session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)[:300])
+
+    # -- notifications: Telegram and Bale ------------------------------------- #
+
+    def _notifier_or_409():
+        n = getattr(runtime, "notifier", None)
+        if n is None:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "notifications are not wired in this build")
+        return n
+
+    @app.get("/api/notify")
+    def notify_overview(session: Session = Depends(current_session)):
+        n = getattr(runtime, "notifier", None)
+        if n is None:
+            return {"available": False}
+        user = security.get_user(session.username)
+        return {"available": True,
+                **n.describe(include_private=bool(user and user.can_change_risk))}
+
+    @app.post("/api/notify/channel")
+    def notify_channel(body: NotifyChannelSave,
+                       session: Session = Depends(require_write("notify_channel",
+                                                                requires_owner=True))):
+        try:
+            return _notifier_or_409().save_channel(
+                body.channel, enabled=body.enabled, chat_id=body.chat_id,
+                categories=body.categories, commands=body.commands, token=body.token,
+                daily_hour_utc=body.daily_hour_utc, by=session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:300])
+
+    @app.post("/api/notify/test")
+    def notify_test(body: NotifyChannelRef,
+                    session: Session = Depends(require_write("notify_test",
+                                                             requires_owner=True))):
+        return _notifier_or_409().test(body.channel, by=session.username)
+
+    @app.post("/api/notify/discover")
+    def notify_discover(body: NotifyChannelRef,
+                        session: Session = Depends(require_write("notify_discover",
+                                                                 requires_owner=True))):
+        return _notifier_or_409().discover(body.channel)
 
     # -- independent reference price (TradingView) ------------------------------ #
 

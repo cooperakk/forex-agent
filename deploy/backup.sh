@@ -25,7 +25,7 @@ out="$DEST_DIR/sentinel-state-$stamp.tar.gz"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-for db in verdicts.db memory.db market.db calendar.db users.db ai.db; do
+for db in verdicts.db memory.db market.db calendar.db users.db ai.db brain.db; do
     src="$STATE_DIR/var/$db"
     [ -f "$src" ] || src="$STATE_DIR/$db"
     [ -f "$src" ] || continue
@@ -48,7 +48,7 @@ done
 # separately, somewhere else.
 for f in audit.jsonl watchdog.jsonl admin.jsonl agent_state.json proposals.json config.json \
          brokers.json broker-secrets.json ai-secrets.json ai.json mt5-intents.json \
-         licence.key licence-timing.json licence-lease.json; do
+         licence.key licence-timing.json licence-lease.json notify.json notify-secrets.json; do
     for cand in "$STATE_DIR/var/$f" "$STATE_DIR/$f"; do
         [ -f "$cand" ] && cp -p "$cand" "$tmp/$f" && break
     done

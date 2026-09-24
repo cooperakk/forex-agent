@@ -47,9 +47,11 @@ mkdir -p "$DEST/var" && touch "$DEST/var/.gitkeep"
 # self-contained right-to-left HTML page that opens with a double-click.
 PY="${PYTHON:-python3}"
 cp docs/INSTALL-FA.md "$DEST/START-HERE-FA.md"
+cp docs/ALPARI-MT5-FA.md "$DEST/ALPARI-MT5-FA.md"
 if "$PY" -c "import markdown" 2>/dev/null; then
     "$PY" scripts/render_guide.py docs/INSTALL-FA.md "$DEST/START-HERE-FA.html"
     "$PY" scripts/render_guide.py docs/RAHNAMA-FA.md "$DEST/docs/RAHNAMA-FA.html"
+    "$PY" scripts/render_guide.py docs/ALPARI-MT5-FA.md "$DEST/ALPARI-MT5-FA.html"
 else
     echo "[package] note: 'markdown' is not installed; the HTML guide is skipped"
 fi
@@ -70,6 +72,8 @@ LEAKS=$(find "$DEST" \( -name '.env' -o -name '*.db' -o -name 'audit.jsonl' \
                         -o -name 'licence.key' -o -name 'vendor-keys' \
                         -o -name 'enrolment-*.txt' \
                         -o -name 'broker-secrets.json' \
+                        -o -name 'ai-secrets.json' -o -name 'notify-secrets.json' \
+                        -o -name 'notify.json' \
                         -o -name 'broker-secrets.key' \
                         -o -name '*.key' \
                         -o -name 'brokers.json' \

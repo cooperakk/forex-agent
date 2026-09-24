@@ -257,7 +257,30 @@ class AuditLog:
             if self._fsync:
                 os.fsync(self._fh.fileno())
             self._seq, self._last_hash = seq, h
-            return rec
+        self._notify_listeners(rec)
+        return rec
+
+    # -- listeners ----------------------------------------------------------- #
+
+    def add_listener(self, fn) -> None:
+        """Call ``fn(record)`` after every append (outside the journal lock).
+
+        For side channels such as notifications. A listener must be quick --
+        enqueue, never send -- and whatever it raises is swallowed: the record
+        is already durable, and a broken side channel must never make an
+        append look failed to the code that wrote it.
+        """
+        listeners = getattr(self, "_listeners", None)
+        if listeners is None:
+            self._listeners = listeners = []
+        listeners.append(fn)
+
+    def _notify_listeners(self, rec: "AuditRecord") -> None:
+        for fn in list(getattr(self, "_listeners", None) or ()):
+            try:
+                fn(rec)
+            except Exception:  # noqa: BLE001 - a side channel never fails an append
+                pass
 
     def close(self) -> None:
         with self._lock:
@@ -351,7 +374,8 @@ class NullAudit(AuditLog):
             rec = AuditRecord(self._seq, wall_ns(), RUN_ID, ev, actor, payload,
                               self._last_hash, "")
             self.records.append(rec)
-            return rec
+        self._notify_listeners(rec)
+        return rec
 
     def close(self) -> None:  # type: ignore[override]
         return

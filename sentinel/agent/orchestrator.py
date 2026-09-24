@@ -158,8 +158,13 @@ class Agent:
         meta_gate: Any = None,
         entry_gate: Optional[Callable[[], tuple]] = None,
         reference: Any = None,
+        brain: Any = None,
     ) -> None:
         self.config = config
+        #: sentinel.brain.Brain, or None. Learns from every signal (taken or
+        #: not) and can only shrink, rest or refuse -- see sentinel/brain.
+        self.brain = brain
+        self._last_layers: Dict[str, float] = {}
         #: sentinel.data.reference.ReferenceGuard, or None. Compares the
         #: broker's price with an independent reference; can only shrink or
         #: block a new entry, and does nothing when the reference is absent.
@@ -749,6 +754,9 @@ class Agent:
 
         # --- 10. learn ------------------------------------------------------ #
         learned, proposed = self._learn()
+        if self.brain is not None:
+            # Score shadow signals whose outcome the new bars now decide.
+            self.brain.resolve(snap, now)
         report.lessons_learned = learned
         report.proposals_created = proposed
         if learned or proposed:
@@ -956,6 +964,18 @@ class Agent:
                 self.audit.append(EventType.CONNECTIVITY,
                                   {"reference_check_failed": str(exc)[:200]})
 
+        brain_cooldowns: Dict[str, str] = {}
+        stress_scenarios: Dict[str, float] = {}
+        stress_limit = 0.0
+        if self.brain is not None:
+            try:
+                self.brain.observe_context(instruments, conversions)
+                brain_cooldowns = self.brain.cooldowns(now_ns)
+                stress_scenarios, stress_limit = self.brain.stress_settings()
+            except Exception as exc:  # noqa: BLE001 - the brain can only add caution
+                self.audit.append(EventType.CONNECTIVITY,
+                                  {"brain_context_failed": str(exc)[:200]})
+
         lifecycles = {a.name: a.lifecycle for a in cfg.strategies}
         normal_spreads: Dict[str, Decimal] = {}
         cost_models: Dict[str, CostModel] = {}
@@ -1012,6 +1032,9 @@ class Agent:
             price_divergence={sym: c.reason[:240]
                               for sym, c in self._reference_checks.items()
                               if getattr(c, "blocked", False)},
+            cooldowns=brain_cooldowns,
+            stress_scenarios=stress_scenarios,
+            stress_limit_pct=dec(stress_limit),
             missing_conversions=sorted(set(missing)),
             blocking_alarms=list(blocking_alarms or []),
             correlations=dict(correlations or {}),
@@ -1685,6 +1708,11 @@ class Agent:
                     pass
                 decision = self._act_on_signal(signal, ctx, snap, regime_name)
                 decisions.append(decision)
+                if self.brain is not None:
+                    # Every considered signal -- taken, vetoed or skipped --
+                    # enters the shadow book, to be scored against the bars
+                    # that follow. Never raises (see Brain.record).
+                    self.brain.record(signal, decision, frame)
                 # Refresh whenever an order reached the venue in ANY live
                 # state, not just a fill -- and UNKNOWN is the MOST important
                 # one, because that is precisely the state where the venue may
@@ -1720,22 +1748,50 @@ class Agent:
         # Carried on the decision so a proposal accepted later by a human is
         # sized with the same shrinkage the agent applied when it made it.
         meta_diag: Dict[str, Any] = {}
+        layers = dict(self._last_layers)
+
+        # The state the signal was raised in: the meta-label filter's
+        # features, the similar-situation memory's query, and the shadow
+        # book's record, all from one causal computation.
+        context: Dict[str, float] = {}
+        try:
+            from ..research.metalabel import bar_context_features, signal_features
+            frame = snap.frames_for(signal.timeframe).get(signal.instrument) \
+                if snap is not None else None
+            context = bar_context_features(frame, len(frame) - 1) \
+                if frame is not None and len(frame) else {}
+            meta_diag["meta_features"] = {k: float(v) for k, v in
+                                          signal_features(signal, context).items()}
+        except Exception:  # noqa: BLE001 - features are an aid, never a gate
+            pass
+
+        if self.brain is not None and meta_diag.get("meta_features"):
+            try:
+                m_sim, why_sim, _info = self.brain.similarity(signal.strategy,
+                                                              meta_diag["meta_features"])
+                if m_sim < 1.0:
+                    layers["similarity"] = m_sim
+                    caution = float(min(caution, m_sim))
+                    decision.lessons.append(why_sim)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.append(EventType.LESSON, {"brain_similarity_failed": str(exc)[:200]})
+        meta_diag["brain_layers"] = layers
 
         # The meta-label gate: whether to act on THIS primary signal at all,
         # from the state it was raised in. It runs before the risk engine so a
         # skipped signal costs nothing, and it can only shrink -- its size
-        # multiplier joins the caution product.
-        if self.meta_gate is not None:
+        # multiplier joins the caution product. A filter named in the
+        # configuration wins; otherwise the owner-approved one the brain's
+        # research lab trained and validated out of sample.
+        gate = self.meta_gate
+        if gate is None and self.brain is not None:
             try:
-                from ..research.metalabel import bar_context_features
-                frame = snap.frames_for(signal.timeframe).get(signal.instrument) \
-                    if snap is not None else None
-                context = bar_context_features(frame, len(frame) - 1) \
-                    if frame is not None and len(frame) else {}
-                act, p, scale = self.meta_gate.decide(signal, context)
-                meta_diag["meta_features"] = {
-                    **{f"sig_{k}": float(v) for k, v in (signal.features or {}).items()},
-                    "strength": float(signal.strength), **context}
+                gate = self.brain.meta_gate()
+            except Exception:  # noqa: BLE001
+                gate = None
+        if gate is not None:
+            try:
+                act, p, scale = gate.decide(signal, context)
                 if p is not None:
                     meta_diag["meta_probability"] = round(float(p), 4)
                 decision.diagnostics.update(meta_diag)
@@ -1744,7 +1800,7 @@ class Agent:
                     decision.vetoes = [{"rule": "meta_label",
                                         "message": f"act probability {p:.2f} below the "
                                                    f"filter's threshold "
-                                                   f"{self.meta_gate.labeler.report.threshold:.2f}",
+                                                   f"{gate.labeler.report.threshold:.2f}",
                                         "severity": "block"}]
                     decision.explanation = (f"{signal.strategy} sees {signal.side.value} "
                                             f"{signal.instrument}, but the meta-label filter "
@@ -1753,6 +1809,7 @@ class Agent:
                     return decision
                 if scale < 1.0:
                     caution = float(min(caution, max(0.0, scale)))
+                    layers["meta_label"] = float(max(0.0, scale))
                     decision.lessons.append(f"meta-label filter scales size by {scale:.2f}")
             except Exception as exc:  # noqa: BLE001 - never let the filter stop the loop
                 self.audit.append(EventType.SIGNAL, {"meta_gate_error": str(exc)[:200]})
@@ -1878,6 +1935,19 @@ class Agent:
         if check is not None and getattr(check, "status", "") == "shrink":
             caution = float(min(dec(caution), dec(check.size_multiplier)))
             reasons.append(check.reason[:160])
+        # The brain: drift, equity-curve filter, Bayesian allocation. Each can
+        # only shrink; the per-layer multipliers travel on the decision so the
+        # shadow book can later score whether each layer helped.
+        self._last_layers = {}
+        if self.brain is not None:
+            try:
+                m, why, layers = self.brain.strategy_layers(strategy, regime_name)
+                self._last_layers = dict(layers)
+                if m < 1.0:
+                    caution = float(min(dec(caution), dec(m)))
+                    reasons.extend(why[:3])
+            except Exception as exc:  # noqa: BLE001
+                self.audit.append(EventType.LESSON, {"brain_layers_failed": str(exc)[:200]})
         return max(0.0, min(1.0, float(caution))), reasons
 
     def entry_permission(self) -> tuple[bool, str]:
@@ -2030,6 +2100,17 @@ class Agent:
                 }
                 self._entry_regime[intent.instrument] = (
                     self.regime.regime.value if self.regime else "")
+                # A human-readable open, for the journal's side channels
+                # (notifications). ORDER_FILLED carries only the order id.
+                self.audit.append(EventType.POSITION_OPEN, {
+                    "instrument": intent.instrument, "side": intent.side.value,
+                    "strategy": intent.strategy,
+                    "lots": str(order.filled_lots or intent.lots),
+                    "entry": str(order.avg_fill_price or decision.entry or ""),
+                    "stop": str(intent.stop_loss),
+                    "target": str(intent.take_profit) if intent.take_profit else None,
+                    "risk_pct": str(intent.risk_pct), "client_order_id": intent.client_order_id,
+                    "state": order.state.value})
             self._save_state()
         elif order.state is OrderState.REJECTED:
             decision.action = "vetoed"
@@ -2503,6 +2584,7 @@ class Agent:
         if not self.config.agent.learning_enabled:
             return 0, 0
         new_autopsies = 0
+        fresh: List[Dict[str, Any]] = []
         for trade in self._closed_trades():
             if trade.trade_id in self.processed_trades:
                 continue
@@ -2523,7 +2605,14 @@ class Agent:
             a = autopsy(trade, path=self._trade_path(trade))
             self.memory.record_autopsy(a.to_dict())
             self.audit.append(EventType.POSTMORTEM, a.to_dict())
+            fresh.append(a.to_dict())
             new_autopsies += 1
+
+        if fresh and self.brain is not None:
+            try:
+                self.brain.on_trades(fresh, self.now())
+            except Exception as exc:  # noqa: BLE001 - streaks are an aid
+                self.audit.append(EventType.LESSON, {"brain_streaks_failed": str(exc)[:200]})
 
         if new_autopsies == 0:
             return 0, 0

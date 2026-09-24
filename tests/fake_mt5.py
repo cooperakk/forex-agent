@@ -88,6 +88,10 @@ class _Symbol:
     swap_mode: int = 1
     swap_long: float = -7.2
     swap_short: float = 2.1
+    #: Value of one tick of one lot in the ACCOUNT currency, as MT5 reports it.
+    trade_tick_size: float = 0.00001
+    trade_tick_value: float = 1.0
+    currency_profit: str = "USD"
 
 
 @dataclass
@@ -239,14 +243,21 @@ class FakeMT5:
         self._supported_filling = supported_filling
         cores = symbols or ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF"]
         self._symbols: Dict[str, _Symbol] = {}
+        # Approximate quote -> USD rates for the tick values a USD account sees.
+        usd_per_quote = {"USD": 1.0, "JPY": 1 / 150.0, "CHF": 1 / 0.88, "CAD": 1 / 1.36,
+                         "GBP": 1.27, "EUR": 1.10}
         for core in cores:
             digits = 3 if core.endswith("JPY") else 5
+            tick = 10.0 ** (-digits)
             self._symbols[core + suffix] = _Symbol(
                 name=core + suffix, digits=digits,
                 trade_contract_size=contract_size,
                 trade_stops_level=stops_level,
                 filling_mode=_SEND_TO_MASK.get(supported_filling,
-                                               SYMBOL_FILLING_IOC))
+                                               SYMBOL_FILLING_IOC),
+                trade_tick_size=tick,
+                trade_tick_value=contract_size * tick * usd_per_quote.get(core[3:], 1.0),
+                currency_profit=core[3:])
         for core, level in (stops_by_symbol or {}).items():
             name = core + suffix
             if name in self._symbols:

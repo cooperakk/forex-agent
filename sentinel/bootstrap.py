@@ -429,6 +429,35 @@ def build_runtime(config_path: str | Path = "var/config.json",
     runtime.reference = ReferenceDesk(lambda: agent.config.reference, guard, stream,
                                       runtime.reference_instruments)
 
+    # --- the brain: learning from every signal, shrink-only --------------- #
+    # See sentinel/brain. It reads the agent's own memory and bar store and
+    # writes var/brain.db; the nightly lab runs on its own thread.
+    from .brain import Brain
+    from .brain.lab import LabDeps, ResearchLab
+    from .brain.store import BrainStore
+
+    brain = Brain(lambda: agent.config.brain, BrainStore(state_dir / "brain.db"),
+                  memory, audit)
+    brain.lab = ResearchLab(LabDeps(
+        config=lambda: agent.config, bar_store=feed.store,
+        instruments=lambda: dict(brain._instruments),
+        conversions=lambda: dict(brain._conversions),
+        proposals=lambda: agent.proposals.pending(),
+        model_dir=state_dir / "brain-models"))
+    agent.brain = brain
+    runtime.brain = brain
+
+    # --- owner notifications: Telegram and Bale ---------------------------- #
+    # Driven by the audit journal, so every event that is recorded can be
+    # notified and nothing can be notified that was not recorded.
+    from .notify import Notifier
+
+    notifier = Notifier(state_dir, audit, status_fn=runtime.status,
+                        kill_fn=runtime.engage_kill)
+    audit.add_listener(notifier.on_audit)
+    runtime.notifier = notifier
+    notifier.start()
+
     jwt_secret = os.environ.get("SENTINEL_JWT_SECRET")
     if not jwt_secret:
         jwt_secret = secrets.token_urlsafe(48)

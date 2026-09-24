@@ -58,6 +58,8 @@ export interface Status {
   api_version?: string;
   /** strategy -> why the performance guard suspended it (1.5.0). */
   guard_suspended?: Record<string, string>;
+  cooldowns?: Record<string, string>;
+  day_pnl?: string | null;
   /** Whether NEW live risk may be opened right now, as far as the licence goes. */
   entries_permitted?: { allowed: boolean; reason: string };
 }
@@ -386,4 +388,94 @@ export interface JevReport {
   breaker: null | { open: boolean; seconds_left: number; failures: number;
                     last_status: number | null };
   recent: JevAnswer[];
+}
+
+/* The brain (sentinel.brain): learning from every signal, shrink-only. */
+export interface RSummary {
+  n: number; mean_r: number | null; ci_low: number | null; ci_high: number | null;
+  sum_r: number; win_rate: number | null;
+}
+
+export interface BrainRule extends RSummary {
+  rule: string; verdict: "helped" | "hurt" | "unclear" | "insufficient";
+}
+
+export interface BrainLayerScore extends RSummary {
+  layer: string; saved_r: number; verdict: "helped" | "hurt" | "unclear" | "insufficient";
+}
+
+export interface BrainStrategy {
+  strategy: string; multiplier: number; reasons: string[]; layers: Record<string, number>;
+  live: RSummary; baseline: { mean_r: number; sd_r: number; source: string };
+  cusum: null | { stat: number; alarm: boolean; recovering: boolean;
+                  first_alarm_index: number | null; path: number[] };
+  drift_threshold: number;
+}
+
+export interface BrainModel {
+  id: string; ts_ns: number; path: string; sha256: string; status: string;
+  decided_by: string | null; decided_ns: number | null;
+  report: { holdout?: { n: number; positives: number; brier: number | null;
+                        skill: number | null; auc: number | null };
+            n_train?: number; n_holdout?: number; n_purged?: number; eligible?: boolean;
+            reason?: string };
+}
+
+export interface BrainLabRun {
+  id: number; ts_ns: number; by?: string; seconds?: number; errors?: string[];
+  strategies: { strategy: string; status: string; n?: number; mean_r?: number | null;
+                boot_low?: number | null; boot_high?: number | null;
+                stressed_mean_r?: number | null; note?: string; error?: string }[];
+  proposals: { id: string; path: string; status: string;
+               mean_r_delta_by_strategy?: number[] }[];
+  meta: null | { trained: boolean; eligible?: boolean; reason?: string; model_id?: string;
+                 holdout?: { auc: number | null; n: number } };
+}
+
+export interface BrainConfig {
+  enabled: boolean; shadow_book: boolean; shadow_default_horizon_bars: number;
+  loss_streak_limit: number; loss_streak_cooldown_hours: number;
+  strategy_loss_streak_limit: number; strategy_cooldown_hours: number;
+  drift_enabled: boolean; drift_min_trades: number; drift_k: number; drift_h: number;
+  drift_multiplier: number; drift_expected_r: number;
+  equity_filter_enabled: boolean; equity_filter_window: number;
+  equity_filter_multiplier: number;
+  similarity_enabled: boolean; similarity_k: number; similarity_min_samples: number;
+  similarity_multiplier: number;
+  allocation_enabled: boolean; allocation_prior_mean_r: number; allocation_prior_sd: number;
+  allocation_floor: number;
+  stress_enabled: boolean; stress_loss_limit_pct: number;
+  stress_scenarios: Record<string, number>;
+  lab_enabled: boolean; lab_hour_utc: number; lab_max_minutes: number; lab_max_bars: number;
+  meta_auto_train: boolean; meta_min_auc: number;
+  weekly_report_dow: number; weekly_report_hour_utc: number;
+}
+
+export interface BrainView {
+  available: boolean; enabled: boolean; regime?: string; config?: BrainConfig;
+  cooldowns?: Record<string, string>;
+  streaks?: { account: number; strategies: Record<string, number> };
+  shadow_counts?: Record<string, number>;
+  scorecard?: { taken: RSummary; rules: BrainRule[]; layers: BrainLayerScore[];
+                strategies: Record<string, { taken: RSummary; not_taken: RSummary }> };
+  strategies?: BrainStrategy[];
+  models?: BrainModel[];
+  meta_live?: { n: number; brier?: number | null; skill?: number | null; auc?: number | null };
+  lab_running?: boolean; lab_runs?: BrainLabRun[];
+  reports?: ({ id: number; ts_ns: number; week_ending: string; trades: RSummary;
+               by_strategy: Record<string, RSummary> } & Record<string, any>)[];
+  baselines?: Record<string, { mean_r: number; sd_r: number; n: number }>;
+  last_error?: string;
+}
+
+/* Telegram and Bale. */
+export interface NotifyChannel {
+  label_fa: string; enabled: boolean; chat_id: string; categories: string[];
+  commands: boolean; sent: number; failed: number; last_error: string; last_ok_ns: number;
+  token_stored: boolean;
+}
+
+export interface NotifyView {
+  available: boolean; channels?: Record<"telegram" | "bale", NotifyChannel>;
+  categories?: string[]; daily_hour_utc?: number; token_storage?: string; queued?: number;
 }

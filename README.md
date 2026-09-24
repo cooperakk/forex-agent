@@ -175,6 +175,16 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 مهرخورده در لحظه‌ی **ورود** نه پردازش. پیشنهادهای پارامتری صف می‌شوند و
 **هرگز خودکار روی حساب زنده اعمال نمی‌شوند**.
 
+**مغز ربات (۱٫۷٫۰)** — «دفتر سایه» نتیجه‌ی **هر** سیگنال را، حتی آن‌هایی که رد شدند،
+با قیمت‌های واقعی بعدی می‌سنجد؛ کارنامه‌ی هر قاعده‌ی ایمنی؛ استراحت اجباری بعد از
+ضررهای پشت سر هم؛ تشخیص افت عملکرد با CUSUM؛ حافظه‌ی موقعیت‌های مشابه؛ تخصیص
+بیزی؛ آزمون بحران بر اساس سقوط‌های ثبت‌شده (فرانک ۲۰۱۵، پوند ۲۰۱۶، ین ۲۰۱۹)؛
+آزمایشگاه شبانه و «فیلتر دوم» که فقط با تأیید مالک فعال می‌شود. همه‌ی لایه‌ها فقط
+می‌توانند **محتاط‌تر** کنند.
+
+**اعلان روی تلگرام و بله** — هشدارها، معامله‌ها، گزارش روزانه و هفتگی؛ از گوشی فقط
+«وضعیت» و «توقف» — هیچ دستوری برای باز کردن معامله یا برداشتن توقف وجود ندارد.
+
 ---
 
 ## مستندات
@@ -190,6 +200,9 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | وقتی چیزی خراب شد چه کنید |
 | [`docs/LICENSING.md`](docs/LICENSING.md) | سامانه لایسنس، و مرزهای واقعی محافظت |
 | [`docs/BROKERS.md`](docs/BROKERS.md) | بروکرها: AMarkets، آلپاری، و هر بروکر متاتریدر |
+| [`docs/ALPARI-MT5-FA.md`](docs/ALPARI-MT5-FA.md) | **آلپاری + متاتریدر ۵: چرا حساب وارد نمی‌شود و چطور ربات را وصل کنیم** |
+| [`docs/BRAIN.md`](docs/BRAIN.md) | The brain: shadow book, drift, cooldowns, stress, meta-label lab |
+| [`docs/RESEARCH-NOTES.md`](docs/RESEARCH-NOTES.md) | Published evidence and market failures behind the design |
 | [`docs/WINDOWS-SERVER.md`](docs/WINDOWS-SERVER.md) | Windows Server installation and operations |
 | [`docs/AI-PROVIDERS.md`](docs/AI-PROVIDERS.md) | AI providers, keys, and what a model may do |
 | [`docs/TRADINGVIEW.md`](docs/TRADINGVIEW.md) | TradingView reference price, ratings and research history |
@@ -199,6 +212,26 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 ---
 
 ## English
+
+### What's new in 1.7.0
+
+* **The brain** (`sentinel/brain`): every considered signal -- taken, vetoed
+  or skipped -- is scored against the bars that followed (triple barrier,
+  adverse-first, gaps at the open). From that: a veto scorecard, loss-streak
+  cooldowns, CUSUM drift detection against a lab-measured baseline, an
+  equity-curve filter, Bayesian strategy x regime allocation, similar-situation
+  memory, a nightly research lab and an owner-approved meta-label filter with
+  purged training. Every layer is shrink-only and measures itself. See
+  [`docs/BRAIN.md`](docs/BRAIN.md).
+* **Gap stress** (`sentinel/risk/stress.py`): the whole book is sized so that
+  the worst recorded gaps (CHF 2015, GBP 2016, JPY 2019) cannot cost more than
+  a set share of equity.
+* **Telegram and Bale notifications** with two safe phone commands (status,
+  stop) and no command that can take risk.
+* **MT5 onboarding**: `deploy/windows/Check-MT5.cmd` explains, in Persian,
+  why an account will not connect; cent accounts (USC) are supported; a
+  step-by-step Alpari guide ([`docs/ALPARI-MT5-FA.md`](docs/ALPARI-MT5-FA.md)).
+* Research basis: [`docs/RESEARCH-NOTES.md`](docs/RESEARCH-NOTES.md).
 
 ### What's new in 1.6.0
 

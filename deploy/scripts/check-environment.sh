@@ -145,8 +145,10 @@ if [ "$QUICK" -eq 0 ]; then
     probe "Jev (TypeSafe) API"              https://api.typesafe.ai/ 0
     probe "TradingView data (reference)"    https://data.tradingview.com/ 0
     probe "TradingView scanner (ratings)"   https://scanner.tradingview.com/ 0
+    probe "Telegram Bot API (notifications)" https://api.telegram.org/ 0
+    probe "Bale Bot API (notifications)"    https://tapi.bale.ai/ 0
     probe "OANDA practice API"              https://api-fxpractice.oanda.com/ 0
-    hint "an unreachable news, AI or TradingView endpoint only disables that feature; trading is unaffected"
+    hint "an unreachable news, AI, TradingView, Telegram or Bale endpoint only disables that feature; trading is unaffected"
     hint "full TradingView test (websocket + ratings): .venv/bin/python scripts/tv_history.py --selftest"
 fi
 
