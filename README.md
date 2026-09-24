@@ -186,6 +186,7 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 | [`docs/ACCEPTANCE-PROTOCOL.md`](docs/ACCEPTANCE-PROTOCOL.md) | تنها مسیر مجاز به پول واقعی |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | استقرار محلی، Docker، systemd |
 | [`docs/RAHNAMA-FA.md`](docs/RAHNAMA-FA.md) | **راهنمای ساده فارسی — از اینجا شروع کنید** |
+| [`docs/INSTALL-FA.md`](docs/INSTALL-FA.md) | **نصب قدم‌به‌قدم، بررسی محیط و عیب‌یابی (ویندوز و لینوکس)** |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | وقتی چیزی خراب شد چه کنید |
 | [`docs/LICENSING.md`](docs/LICENSING.md) | سامانه لایسنس، و مرزهای واقعی محافظت |
 | [`docs/BROKERS.md`](docs/BROKERS.md) | بروکرها: AMarkets، آلپاری، و هر بروکر متاتریدر |
