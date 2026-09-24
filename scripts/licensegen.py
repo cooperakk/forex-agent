@@ -110,8 +110,8 @@ def cmd_keygen(args) -> int:
     print(f"private key -> {private}   (0600, NEVER distribute this)")
     print(f"public key  -> {public}")
     print()
-    print("Embed the public key in the build you ship:")
-    print(f"    SENTINEL_LICENSE_PUBKEY={pub}")
+    print("Embed the public key in the build you ship (then sign the manifest):")
+    print(f"    ./scripts/licensegen.py embed-key --pubkey {public}")
     print()
     print("Back the private key up offline. If you lose it you cannot issue or")
     print("renew any licence; if it leaks, every licence becomes forgeable and")
@@ -307,6 +307,40 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def cmd_embed_key(args) -> int:
+    """Write the vendor public key(s) into sentinel/licensing/vendor_key.py.
+
+    Run at release time, BEFORE `manifest`: the manifest hashes the file, so a
+    customer who swaps the key afterwards fails the integrity check, and with
+    an embedded key the SENTINEL_LICENSE_PUBKEY environment variable is
+    ignored (it can no longer switch licensing off or substitute a key).
+    """
+    import re
+
+    from sentinel.licensing.license import load_public_key
+
+    pub = _resolve_pubkey(args.pubkey)
+    load_public_key(pub)            # refuse a malformed key before writing it
+    lease = _resolve_pubkey(args.lease_pubkey) if args.lease_pubkey else ""
+    if lease:
+        load_public_key(lease)
+    target = Path(args.target or (ROOT / "sentinel" / "licensing" / "vendor_key.py"))
+    text = target.read_text(encoding="utf-8")
+    text, n1 = re.subn(r'^EMBEDDED_PUBLIC_KEY = ".*"$', f'EMBEDDED_PUBLIC_KEY = "{pub}"',
+                       text, flags=re.M)
+    text, n2 = re.subn(r'^EMBEDDED_LEASE_PUBLIC_KEY = ".*"$',
+                       f'EMBEDDED_LEASE_PUBLIC_KEY = "{lease}"', text, flags=re.M)
+    if n1 != 1 or n2 != 1:
+        print(f"{target} does not have the expected key lines", file=sys.stderr)
+        return 1
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+    print(f"embedded the licence key{' and the lease key' if lease else ''} in {target}")
+    print("Now sign the manifest:  licensegen.py manifest --key <private.pem>")
+    return 0
+
+
 def cmd_manifest(args) -> int:
     pem = Path(args.key).read_text(encoding="utf-8")
     text = build_manifest(ROOT, pem, version=args.version)
@@ -409,6 +443,13 @@ def main() -> int:
     p.add_argument("--version", default="")
     p.add_argument("--out")
     p.set_defaults(func=cmd_manifest)
+
+    p = sub.add_parser("embed-key", help="embed the vendor public key in this build "
+                                         "(release time, before `manifest`)")
+    p.add_argument("--pubkey", required=True, help="licence public key (file or base64)")
+    p.add_argument("--lease-pubkey", help="activation-lease public key, if separate")
+    p.add_argument("--target", help="vendor_key.py to rewrite (default: this tree)")
+    p.set_defaults(func=cmd_embed_key)
 
     p = sub.add_parser("check-manifest", help="verify this install against a manifest")
     p.add_argument("--manifest")

@@ -93,17 +93,47 @@ apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
     python3 python3-venv python3-dev build-essential \
     sqlite3 ca-certificates curl tar gzip >/dev/null
-say "python        $(python3 --version 2>&1)"
 
-if ! command -v node >/dev/null 2>&1; then
-    warn "Node.js is not installed, so the dashboard cannot be built from source."
-    if [ -d "$SRC_DIR/dashboard/dist" ]; then
-        say "a prebuilt dashboard is present in the package; using it."
+# The project needs Python 3.11+ (pyproject: requires-python >= 3.11; the
+# pinned numpy/pandas have no wheels below it). Ubuntu 22.04's python3 is
+# 3.10, and before 1.5.0 the installer used it anyway and failed half-way
+# through `pip install` with an error that did not mention the version.
+py_ok() { "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+            >/dev/null 2>&1; }
+PYBIN=""
+for cand in python3.13 python3.12 python3.11 python3; do
+    if command -v "$cand" >/dev/null 2>&1 && py_ok "$cand"; then PYBIN="$(command -v "$cand")"; break; fi
+done
+if [ -z "$PYBIN" ]; then
+    say "python3 is older than 3.11; installing python3.11 from the distribution..."
+    apt-get install -y -qq --no-install-recommends python3.11 python3.11-venv python3.11-dev \
+        >/dev/null 2>&1 || true
+    if command -v python3.11 >/dev/null 2>&1 && py_ok python3.11; then
+        PYBIN="$(command -v python3.11)"
     else
-        warn "install Node 20+ and re-run to get the dashboard."
+        die "Python 3.11+ is required and could not be installed automatically.
+       On Ubuntu 22.04:  sudo add-apt-repository ppa:deadsnakes/ppa && \\
+                         sudo apt install python3.11 python3.11-venv python3.11-dev
+       Or use Ubuntu 24.04, whose python3 is 3.12."
     fi
-else
+fi
+say "python        $("$PYBIN" --version 2>&1) ($PYBIN)"
+
+# Node 18+ builds the dashboard. A git checkout has no prebuilt bundle
+# (dashboard/dist is not committed), so without Node there is no console.
+node_ok() { command -v node >/dev/null 2>&1 && \
+            [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 18 ]; }
+if ! node_ok && [ ! -f "$SRC_DIR/dashboard/dist/index.html" ]; then
+    say "installing Node.js from the distribution to build the dashboard..."
+    apt-get install -y -qq --no-install-recommends nodejs npm >/dev/null 2>&1 || true
+fi
+if node_ok; then
     say "node          $(node --version)"
+elif [ -f "$SRC_DIR/dashboard/dist/index.html" ]; then
+    say "node          not needed (a prebuilt dashboard is in the package)"
+else
+    warn "Node.js 18+ is not available, so the dashboard cannot be built."
+    warn "The engine will run; install Node 20 (https://nodejs.org) and re-run for the console."
 fi
 
 # --------------------------------------------------------------------------- #
@@ -137,15 +167,19 @@ if [ "$SRC_DIR" != "$INSTALL_DIR" ]; then
 fi
 
 cd "$INSTALL_DIR"
+if [ -x .venv/bin/python ] && ! py_ok .venv/bin/python; then
+    warn "the existing virtualenv uses Python < 3.11; rebuilding it"
+    rm -rf .venv
+fi
 if [ ! -x .venv/bin/python ]; then
-    python3 -m venv .venv
+    "$PYBIN" -m venv .venv
     say "virtualenv created"
 fi
 .venv/bin/pip install --quiet --upgrade pip
 .venv/bin/pip install --quiet -r requirements.txt
 say "python dependencies installed"
 
-if command -v npm >/dev/null 2>&1 && [ -f dashboard/package.json ]; then
+if node_ok && command -v npm >/dev/null 2>&1 && [ -f dashboard/package.json ]; then
     if [ ! -d dashboard/dist ] || [ "${REBUILD_DASHBOARD:-0}" = "1" ]; then
         say "building the dashboard (this takes a minute)..."
         ( cd dashboard && npm ci --silent --no-audit --no-fund && npm run build --silent )

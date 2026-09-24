@@ -46,7 +46,13 @@ def source_digest() -> str:
         return cached
     h = hashlib.sha256()
     for sub in _SOURCE_SCOPE:
-        for file in sorted((root / sub).rglob("*.py")):
+        # Compiled modules count as source. A protected build ships the risk
+        # engine as a native extension with no .py beside it; hashing only
+        # *.py would leave the most consequential code outside the digest.
+        # A plain source checkout has no binaries, so its digest is unchanged.
+        files = [f for pattern in ("*.py", "*.so", "*.pyd")
+                 for f in (root / sub).rglob(pattern)]
+        for file in sorted(files):
             h.update(str(file.relative_to(root)).replace("\\", "/").encode("utf-8"))
             h.update(file.read_bytes())
     digest = h.hexdigest()
@@ -66,6 +72,9 @@ def runtime_policy(config=None) -> dict:
     data = data or SentinelConfig().model_dump(mode="json")
     agent = dict(data.get("agent", {}))
     agent.pop("mode", None)
+    # An operating permission for HUMAN tickets; it changes nothing about what
+    # the validated strategy does with a signal.
+    agent.pop("manual_trading_live", None)
     # The meta-model is identified by CONTENT, not by path: the same file
     # name holding a different model is a different filter.
     model_path = agent.pop("meta_model_path", None)
@@ -99,7 +108,9 @@ def config_fingerprint(instruments, params, timeframe: str, *, runtime_config=No
     """
     body = json.dumps({
         "schema": 2,
-        "instruments": sorted(instruments or []),
+        # list() first: `sorted(x or [])` crashes the Cython compiler used for
+        # protected builds (EarlyReplaceBuiltinCalls); the result is identical.
+        "instruments": sorted(list(instruments or [])),
         "params": params or {},
         "timeframe": timeframe or "",
         "source_sha256": source_digest(),

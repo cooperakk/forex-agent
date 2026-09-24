@@ -60,7 +60,8 @@ class NewsPolicy:
                  correction_size_multiplier: Decimal = D("0.5"),
                  contradiction_blocks: bool = True,
                  require_certain_dates: bool = True,
-                 unconfirmed_size_multiplier: Decimal = D("0.75")) -> None:
+                 unconfirmed_size_multiplier: Decimal = D("0.75"),
+                 extractions_source=None) -> None:
         if role not in ("risk_filter", "meta_label", "signal"):
             raise ValueError(f"unknown news role {role!r}")
         self.calendar = calendar
@@ -77,11 +78,20 @@ class NewsPolicy:
         # one-directional response to a known unknown.
         self.require_certain_dates = require_certain_dates
         self.unconfirmed_size_multiplier = dec(unconfirmed_size_multiplier)
+        #: ``(now_ns) -> [Extraction]``, normally NewsDesk.recent_extractions.
+        #: Read from a cache the desk fills in the background; never a network
+        #: call on the trading thread.
+        self.extractions_source = extractions_source
 
     def assess(self, now_ns: int, instruments: Sequence[str],
                extractions: Sequence[Extraction] | None = None
                ) -> dict[str, NewsAssessment]:
         out = {sym: NewsAssessment(sym, False, D("1"), role=self.role) for sym in instruments}
+        if extractions is None and self.extractions_source is not None:
+            try:
+                extractions = list(self.extractions_source(now_ns))
+            except Exception:  # noqa: BLE001 - the desk must never break the cycle
+                extractions = []
 
         if self.calendar is not None:
             blackout = self.calendar.instrument_blackout(

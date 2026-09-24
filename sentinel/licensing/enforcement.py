@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .activation import ActivationClient, LeaseStatus
 from .clock_guard import ClockGuard, GuardReport
 from .integrity import IntegrityReport, verify_manifest
 from .license import (
@@ -36,9 +37,31 @@ from .license import (
     verify,
 )
 
-#: The vendor's public key, embedded at build time. Overridable by environment
-#: for self-hosted builds where the customer IS the vendor.
-VENDOR_PUBLIC_KEY = os.environ.get("SENTINEL_LICENSE_PUBKEY", "")
+from . import vendor_key as _vendor_key
+
+
+def resolve_vendor_key(explicit: Optional[str] = None) -> str:
+    """The key licences are verified against. See vendor_key.py for why.
+
+    An EMBEDDED key always beats the environment. Reading the environment
+    first let a licensee unset the variable (licensing off) or point it at a
+    key they generated (self-signed unlimited licence).
+    """
+    if explicit:
+        return explicit
+    embedded = (_vendor_key.EMBEDDED_PUBLIC_KEY or "").strip()
+    if embedded:
+        return embedded
+    return os.environ.get("SENTINEL_LICENSE_PUBKEY", "").strip()
+
+
+def is_distributed_build() -> bool:
+    """True when this build carries a vendor key of its own."""
+    return bool((_vendor_key.EMBEDDED_PUBLIC_KEY or "").strip())
+
+
+#: Kept for callers that read it; resolve_vendor_key() is the authority.
+VENDOR_PUBLIC_KEY = resolve_vendor_key()
 
 #: Days a licence keeps working past its expiry. Not generosity: a renewal that
 #: arrives late must not flatten a live book at 3am.
@@ -67,6 +90,14 @@ RENEWAL_MESSAGES = {
 }
 
 
+def _software_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("sentinel-fx")
+    except Exception:  # noqa: BLE001 - a source checkout has no metadata
+        return ""
+
+
 @dataclass
 class LicenseStatus:
     valid: bool
@@ -78,6 +109,10 @@ class LicenseStatus:
     days_remaining: Optional[float] = None
     unlicensed_mode: bool = False
     clock: Optional[GuardReport] = None
+    #: The online activation lease, when the licence requires one.
+    activation: Optional[LeaseStatus] = None
+    #: True when this build embeds its own vendor key (see vendor_key.py).
+    distributed: bool = False
     #: healthy | approaching | due | critical | expired | perpetual | none
     stage: str = "none"
     #: The headline and the sentence under it, already in plain Persian.
@@ -111,6 +146,8 @@ class LicenseStatus:
             "advice": self.advice,
             "clock": self.clock.to_dict() if self.clock else None,
             "integrity": self.integrity.to_dict() if self.integrity else None,
+            "activation": self.activation.to_dict() if self.activation else None,
+            "distributed_build": self.distributed,
         }
 
 
@@ -124,7 +161,10 @@ class LicenseGate:
                  grace_days: int = DEFAULT_GRACE_DAYS,
                  fingerprint: Optional[Dict[str, str]] = None,
                  guard_path: Optional[str] = None,
-                 enable_clock_guard: bool = True) -> None:
+                 enable_clock_guard: bool = True,
+                 require_manifest: Optional[bool] = None,
+                 activation_transport=None,
+                 lease_public_key: Optional[str] = None) -> None:
         # `fingerprint` overrides what this machine reports. Used by the tests,
         # and by `licensegen inspect` to check a licence against a machine other
         # than the one running the command.
@@ -133,8 +173,21 @@ class LicenseGate:
             licence_path or os.environ.get("SENTINEL_LICENSE", "var/licence.key"))
         self.root = Path(root or Path(__file__).resolve().parents[2])
         self.manifest_path = Path(manifest_path or (self.root / "MANIFEST.sig"))
-        self.public_key = public_key or VENDOR_PUBLIC_KEY
+        self.public_key = resolve_vendor_key(public_key)
+        #: A distributed build must carry its signed manifest. Treating a
+        #: MISSING manifest as "unsigned, fine" let `rm MANIFEST.sig` switch
+        #: the integrity check off for live trading, which the docstring of
+        #: integrity.verify_manifest says requires a verified installation.
+        self.require_manifest = (is_distributed_build() if require_manifest is None
+                                 else bool(require_manifest))
         self.grace_days = grace_days
+        lease_key = (lease_public_key
+                     or (_vendor_key.EMBEDDED_LEASE_PUBLIC_KEY or "").strip()
+                     or self.public_key)
+        self.activation = ActivationClient(
+            self.licence_path.parent / "licence-lease.json",
+            public_key_b64=lease_key, transport=activation_transport,
+            software_version=_software_version())
         self._status: Optional[LicenseStatus] = None
         self._checked_monotonic: float = 0.0
         #: How long a verdict may be reused. Without a TTL the gate was
@@ -292,6 +345,7 @@ class LicenseGate:
         # expiry. The recording happens on the LicenseExpired branch above,
         # which is the only path an expired licence actually takes.
         clock = self._run_guard(now, licence.licence_id, False)
+        activation = self._activation_status(licence, document, now)
         valid = True
         reason = ""
         if clock is not None and not clock.ok:
@@ -313,11 +367,45 @@ class LicenseGate:
                 "پس فقط ثبت شده و جلوی کاری گرفته نشده."
                 + (f" {clock.message}" if clock.message else ""))
 
+        if activation is not None and activation.required and not activation.ok:
+            if activation.lease is not None and activation.lease.status != "active":
+                # The vendor's server has withdrawn this licence. That is a
+                # verdict about the licence, not about the network.
+                valid = False
+                reason = activation.reason
+                headline = "لایسنس از سوی فروشنده غیرفعال شده است"
+                advice = ("سرور فعال‌سازی فروشنده این لایسنس را باطل یا معلق اعلام "
+                          "کرده است. معامله‌های باز همچنان مدیریت می‌شوند ولی معاملهٔ "
+                          "واقعی تازه باز نمی‌شود.")
+                stage = "revoked"
+            else:
+                warnings.append(
+                    "فعال‌سازی آنلاین لایسنس انجام نشده یا منقضی شده است؛ تا وقتی "
+                    "سرور فعال‌سازی فروشنده در دسترس نباشد، معاملهٔ واقعی تازه باز "
+                    "نمی‌شود. " + activation.reason)
+        elif activation is not None and activation.network_error and activation.ok:
+            warnings.append(
+                "سرور فعال‌سازی در دسترس نبود؛ مجوز قبلی تا "
+                f"{(activation.lease.expires_at if activation.lease else '')[:16]} "
+                "معتبر است.")
+
         return LicenseStatus(valid=valid, reason=reason, licence=licence,
                              integrity=integrity, warnings=warnings,
                              in_grace=in_grace, days_remaining=remaining,
                              clock=clock, stage=stage, headline=headline,
-                             advice=advice)
+                             advice=advice, activation=activation,
+                             distributed=is_distributed_build())
+
+    def _activation_status(self, licence: License, document: str,
+                           now: datetime) -> Optional[LeaseStatus]:
+        try:
+            from .fingerprint import machine_fingerprint
+            fingerprint = self._fingerprint or machine_fingerprint()
+            return self.activation.status(licence, document, fingerprint, now=now)
+        except Exception as exc:  # noqa: BLE001 - a broken client is a missing lease
+            required = bool(licence.activation_url and licence.activation_interval_hours)
+            return LeaseStatus(required=required, ok=not required,
+                               reason=f"activation check failed: {exc}")
 
     def _run_guard(self, now: datetime, licence_id: str,
                    expired: bool) -> Optional[GuardReport]:
@@ -332,6 +420,11 @@ class LicenseGate:
 
     def _check_integrity(self) -> Optional[IntegrityReport]:
         if not self.manifest_path.exists():
+            if self.require_manifest:
+                return IntegrityReport(
+                    ok=False, unsigned=False,
+                    error=(f"{self.manifest_path.name} is missing from a distributed "
+                           "build; the installation cannot prove it is unmodified"))
             report = IntegrityReport(ok=True, unsigned=True)
             report.error = None
             return report
@@ -357,6 +450,10 @@ class LicenseGate:
                 f"سطح این لایسنس «{status.licence.tier}» است و معاملهٔ واقعی را "
                 "شامل نمی‌شود. حالت تمرینی و آزمایشگاه پژوهش بدون تغییر کار "
                 "می‌کنند.")
+        activation = status.activation
+        if activation is not None and activation.required and not activation.ok:
+            return False, ("معاملهٔ واقعی به فعال‌سازی آنلاین لایسنس نیاز دارد: "
+                           + activation.reason)
         integrity = status.integrity
         if integrity is not None and not integrity.ok and not integrity.unsigned:
             # Live money on an installation whose protected modules do not match

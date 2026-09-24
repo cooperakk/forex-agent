@@ -44,6 +44,14 @@ PROTECTED_PATHS = (
     "sentinel/core/ids.py",
     "sentinel/research/verdicts.py",
     "sentinel/api/security.py",
+    # 1.5.0: where the vendor key lives, the online activation check, the
+    # anti-rollback guard, and the two places the licence gate is wired in.
+    # Editing any of them is the short path around every check above.
+    "sentinel/licensing/vendor_key.py",
+    "sentinel/licensing/activation.py",
+    "sentinel/licensing/clock_guard.py",
+    "sentinel/bootstrap.py",
+    "sentinel/agent/orchestrator.py",
 )
 
 

@@ -323,3 +323,111 @@ dashboard keeps working read-only and says exactly what is wrong, and **existing
 positions keep being managed** — stops, trails, the give-back ratchet, the
 weekend flatten. Refusing to protect an open trade because an invoice is unpaid
 would be indefensible.
+
+---
+
+## 1.5.0 hardening
+
+Four gaps let a licensee trade live without a valid licence in 1.4.0. Each is
+closed, and each has a regression test in `tests/test_licensing_150.py`.
+
+### 1. The vendor key is embedded, and the environment can no longer override it
+
+Before 1.5.0 the only source of the vendor key was `SENTINEL_LICENSE_PUBKEY`.
+Unsetting it switched licensing off ("unlicensed mode"); pointing it at a key
+the licensee generated made a self-signed "unlimited" licence verify.
+
+`sentinel/licensing/vendor_key.py` now carries the key(s), written at release
+time:
+
+```bash
+./scripts/licensegen.py embed-key --pubkey ./vendor-keys/public.txt \
+    [--lease-pubkey ./lease-keys/public.txt]
+./scripts/licensegen.py manifest --key ./vendor-keys/private.pem --version 1.5.0
+```
+
+Resolution order: an explicit argument, then the **embedded** key (the
+environment is then ignored), then the environment -- the last only for
+self-hosted builds with no embedded key.
+
+### 2. A distributed build must carry its manifest
+
+With an embedded key, a missing `MANIFEST.sig` is an integrity **failure** for
+live trading, not "unsigned, fine". Deleting the manifest used to switch the
+integrity check off. The manifest now also covers `vendor_key.py`,
+`activation.py`, `clock_guard.py`, `bootstrap.py` and `agent/orchestrator.py`,
+the files that wire the gate in.
+
+### 3. The licence is asked every cycle, not once at boot
+
+A licence that expired while the service stayed up kept authorising live
+entries until the next restart. `Agent.entry_permission()` now asks the gate on
+every decision cycle and on every human entry path (accepting a proposal, the
+manual trade ticket). Only **new** live risk is refused; exits, stops and the
+management of open positions are never gated by a licence.
+
+### 4. Online activation is implemented
+
+`activation_url` was carried in every licence and implemented nowhere. It is
+now the one control a licensee with root cannot delete, because its answer
+comes from the vendor's server (`sentinel/licensing/activation.py`):
+
+* the client POSTs the licence, a digest of the machine fingerprint and a
+  random nonce; the server answers with an Ed25519-signed **lease**;
+* the client accepts it only if the signature verifies against the lease key,
+  the nonce is the one it sent (no replay), and the licence id and device are
+  its own; the lease is cached (0600) and bounded by its own expiry;
+* **server unreachable** -> the cached lease keeps working until it expires
+  (default 72 h), so a vendor outage never stops a live book at 3 am;
+* **revoked / seats exhausted** -> no new live entries, reason shown verbatim;
+* the server's clock is a time reference the licensee does not control: a
+  local clock rolled back behind the last lease is refused.
+
+Issue a licence that requires activation:
+
+```bash
+./scripts/licensegen.py issue --key ./vendor-keys/private.pem --to "Acme" \
+    --tier live_single --months 3 --machine-file acme-fp.json \
+    --activation-url https://licence.example.com/v1/lease --activation-interval 24
+```
+
+Run the vendor's activation server with a **separate lease key** (the licence
+key stays offline; a compromised activation server can mint leases for
+existing licences, never licences):
+
+```bash
+./scripts/licensegen.py keygen --out ./lease-keys
+python scripts/license_server.py serve --db var/licence-server.db \
+    --lease-key ./lease-keys/private.pem --vendor-pubkey ./vendor-keys/public.txt \
+    --host 127.0.0.1 --port 8443          # behind a TLS reverse proxy
+python scripts/license_server.py register --db ... --licence acme.key --seats 1
+python scripts/license_server.py revoke   --db ... --licence-id XXXX-... --reason "..."
+python scripts/license_server.py reset-devices --db ... --licence-id XXXX-...
+```
+
+### Protected (compiled) builds
+
+```bash
+pip install "cython>=3.0" setuptools        # plus a C compiler
+python scripts/build_protected.py --version 1.5.0 \
+    --key ./vendor-keys/private.pem --pubkey ./vendor-keys/public.txt \
+    --lease-pubkey ./lease-keys/public.txt --compile --out ./release
+```
+
+This copies the tree without vendor-only tools, embeds the keys, compiles the
+licensing, risk, audit, verdict and security modules to native extension
+modules **and deletes their Python source**, signs the manifest over the
+shipped binaries, and packs a tarball. Build on the customer's platform
+(OS, architecture, Python minor version). The full test suite passes against a
+compiled build, except the two tests that assert *self-hosted* behaviour
+(no key -> inert; no manifest -> allowed), which a distributed build correctly
+refuses.
+
+### The honest limit, restated
+
+Ed25519 makes licences unforgeable and uneditable. Compilation and the signed
+manifest raise tampering from "edit one line" to "reverse-engineer and patch
+machine code, then defeat the manifest". Neither is absolute against someone
+with root on their own machine. The online lease is the control that is not in
+their hands; for the strongest guarantee, keep the most valuable computation on
+a server you operate.

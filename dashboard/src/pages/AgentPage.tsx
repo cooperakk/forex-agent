@@ -11,6 +11,7 @@ export default function AgentPage({ snap, write }: {
   write: (path: string, body: unknown, totp: string) => Promise<{ ok: boolean; detail: string }>;
 }) {
   const { decisions, lessons, proposals } = snap;
+  const suspended = snap.status.guard_suspended ?? {};
   const [filter, setFilter] = useState<"all" | "executed" | "vetoed" | "queued">("all");
   const [confirm, setConfirm] = useState<null | {
     action: string; description: React.ReactNode; path: string; body: unknown;
@@ -29,6 +30,29 @@ export default function AgentPage({ snap, write }: {
 
   return (
     <div className="stack gap16">
+      {Object.keys(suspended).length > 0 && (
+        <Card title="استراتژی‌های معلق‌شده توسط نگهبان عملکرد"
+              hint={<>وقتی میانگین نتیجه یک استراتژی بعد از دست‌کم ۵۰ معامله، حتی با
+                خوش‌بینانه‌ترین تخمین آماری منفی باشد، ربات آن را معلق می‌کند تا با پول شما
+                به ضرر دادن ادامه ندهد. فقط مدیر می‌تواند آزادش کند.</>}>
+          <div className="stack gap8">
+            {Object.entries(suspended).map(([name, why]) => (
+              <div key={name} className="row gap8 wrap">
+                <Chip tone="warn">{name}</Chip>
+                <span className="fs12 muted ltr">{why}</span>
+                <button className="btn ghost sm" style={{ marginInlineStart: "auto" }}
+                        onClick={() => setConfirm({
+                          action: `آزاد کردن ${name}`,
+                          description: <>این استراتژی دوباره اجازه باز کردن معامله تازه
+                            می‌گیرد. فقط وقتی این کار را بکنید که علت ضررها را بررسی کرده‌اید؛
+                            نگهبان اگر ضرر ادامه پیدا کند، دوباره معلقش می‌کند.</>,
+                          path: "/api/control/release-guard", body: { strategy: name },
+                        })}>آزاد کردن</button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
       <div className="grid g-2-1">
         <Card title="ربات چه دید و چه کرد"
               hint={<>هر کارت یک فرصت است که ربات پیدا کرده، همراه با دلیل کامل تصمیمش.
@@ -60,6 +84,18 @@ export default function AgentPage({ snap, write }: {
                   {d.side && <Chip>{d.side === "BUY" ? "خرید" : "فروش"}</Chip>}
                   <span className="fs11 muted">{d.strategy}</span>
                   {d.regime && <Chip title="حال‌وهوای بازار در آن لحظه">{REGIME_FA[d.regime] ?? d.regime}</Chip>}
+                  {typeof d.diagnostics?.meta_probability === "number" && (
+                    <Chip tone="info" title="احتمال موفقیت این فرصت از نگاه فیلتر دوم (مدل آماری)">
+                      فیلتر دوم: {(Number(d.diagnostics.meta_probability) * 100).toFixed(0)}٪
+                    </Chip>
+                  )}
+                  {typeof d.diagnostics?.caution_multiplier === "number"
+                    && Number(d.diagnostics.caution_multiplier) < 1 && (
+                    <Chip tone="warn" title="درس‌های گذشته و اخبار، حجم را این‌قدر کوچک کردند">
+                      حجم ×{Number(d.diagnostics.caution_multiplier).toFixed(2)}
+                    </Chip>
+                  )}
+                  {d.strategy === "manual" && <Chip>دستی</Chip>}
                   <span className="fs11 faint" style={{ marginInlineStart: "auto" }}>{ago(d.ts_ns)}</span>
                 </div>
                 <p className="fs12" style={{ lineHeight: 1.85 }}>{d.explanation}</p>
@@ -237,6 +273,14 @@ const STATUS_TONE: Record<string, any> = {
 };
 /* Diagnostic keys, said in words instead of trading shorthand. */
 const DIAG_FA: Record<string, string> = {
+  meta_probability: "احتمال موفقیت از نگاه فیلتر دوم",
+  meta_features: "ورودی‌های فیلتر دوم",
+  caution_multiplier: "ضریب کوچک‌کردن حجم (درس‌ها و اخبار)",
+  horizon_bars: "افق زمانی معامله (تعداد کندل)",
+  timeframe: "بازه زمانی کندل‌ها",
+  venue_order_state: "وضعیت سفارش نزد بروکر",
+  group_total_risk_pct: "جمع ریسک همه حساب‌ها (٪)",
+  positions_with_unknown_risk: "معامله‌های باز با ریسک نامعلوم",
   spread_pips: "اختلاف قیمت خرید و فروش (پیپ)",
   stop_pips: "فاصله تا حد ضرر (پیپ)",
   reward_risk: "سود احتمالی چند برابر ریسک است",

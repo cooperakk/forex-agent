@@ -474,7 +474,12 @@ def issue(*, private_key_pem: str, issued_to: str, tier: str,
 
 
 def _licence_id(issued_to: str, when: datetime) -> str:
-    seed = f"{issued_to}|{when.isoformat()}".encode("utf-8")
+    # A random component. Derived from (customer, second) alone, two licences
+    # issued to one customer in the same second -- a batch for several
+    # machines -- shared an id, and the anti-rollback guard, which remembers
+    # ids it has watched expire, could then condemn the wrong one.
+    import secrets as _secrets
+    seed = f"{issued_to}|{when.isoformat()}|{_secrets.token_hex(8)}".encode("utf-8")
     digest = hashlib.sha256(seed).hexdigest()[:16].upper()
     return "-".join(digest[i:i + 4] for i in range(0, 16, 4))
 
@@ -497,13 +502,23 @@ def parse(document: str) -> tuple:
     except Exception as exc:  # noqa: BLE001
         raise LicenseInvalid(f"licence body is corrupt: {exc}") from exc
 
+    if not isinstance(parsed, dict):
+        raise LicenseInvalid("licence body is not a JSON object")
     if parsed.get("algorithm") != "Ed25519":
         raise LicenseInvalid(
             f"unsupported signature algorithm {parsed.get('algorithm')!r}")
     payload = parsed.get("payload")
     if not isinstance(payload, dict):
         raise LicenseInvalid("licence has no payload")
-    if int(payload.get("format", 0)) > LICENSE_FORMAT:
+    # Everything below runs BEFORE the signature is checked, on input anyone
+    # can craft. It must fail as LicenseInvalid -- never as a bare ValueError
+    # or TypeError, which escaped every caller's `except LicenseError` and
+    # turned a pasted typo into an HTTP 500 from the licence endpoint.
+    try:
+        fmt = int(payload.get("format", 0))
+    except (TypeError, ValueError) as exc:
+        raise LicenseInvalid(f"licence format is not a number: {exc}") from exc
+    if fmt > LICENSE_FORMAT:
         raise LicenseInvalid(
             f"this licence is format {payload.get('format')}, and this build "
             f"understands up to {LICENSE_FORMAT}. Upgrade the software.")
@@ -513,8 +528,31 @@ def parse(document: str) -> tuple:
         raise LicenseInvalid(f"signature is not valid base64: {exc}") from exc
 
     known = {f for f in License.__dataclass_fields__}
-    licence = License(**{k: v for k, v in payload.items() if k in known})
+    try:
+        licence = License(**{k: v for k, v in payload.items() if k in known})
+        _check_types(licence)
+    except LicenseInvalid:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise LicenseInvalid(f"licence payload is malformed: {exc}") from exc
     return licence, signature, _canonical(payload)
+
+
+def _check_types(licence: "License") -> None:
+    """Refuse a payload whose fields would crash a later reader."""
+    for name in ("licence_id", "issued_to", "issued_at", "tier"):
+        if not isinstance(getattr(licence, name), str):
+            raise LicenseInvalid(f"licence field {name!r} must be text")
+    if licence.expires_at is not None and not isinstance(licence.expires_at, str):
+        raise LicenseInvalid("licence field 'expires_at' must be text or null")
+    if not isinstance(licence.machine, dict) or not isinstance(licence.capabilities, dict):
+        raise LicenseInvalid("licence 'machine' and 'capabilities' must be objects")
+    for name in ("activation_interval_hours", "term_months", "term_index", "anchor_day"):
+        if not isinstance(getattr(licence, name), int):
+            raise LicenseInvalid(f"licence field {name!r} must be an integer")
+    _parse_ts(licence.issued_at)
+    if licence.expires_at:
+        _parse_ts(licence.expires_at)
 
 
 def verify(document: str, public_key_b64: str, *,

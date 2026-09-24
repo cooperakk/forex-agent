@@ -71,8 +71,10 @@ from .regime import RegimeState, classify
 # how many are needed before the median is trusted instead of the live value.
 _SPREAD_WINDOW = 500
 _SPREAD_MIN_SAMPLES = 30
-# Equity marks kept for the rolling-24h loss budget.
-_EQUITY_MARK_WINDOW = 5000
+# Equity marks kept for the rolling-24h loss budget: at most one per bucket,
+# so 24h needs 288 of them whatever the decision interval.
+_EQUITY_MARK_WINDOW = 400
+_EQUITY_MARK_BUCKET_NS = 300 * 1_000_000_000
 # Seconds per bar, used to turn a signal's horizon in bars into a time stop.
 _TIMEFRAME_SECONDS = {
     "M1": 60, "M5": 300, "M15": 900, "M30": 1800,
@@ -154,8 +156,12 @@ class Agent:
         clock_fn: Optional[Callable[[], int]] = None,
         news: Optional[NewsPolicy] = None,
         meta_gate: Any = None,
+        entry_gate: Optional[Callable[[], tuple]] = None,
     ) -> None:
         self.config = config
+        #: ``() -> (allowed, reason)``, asked before any NEW live risk is opened
+        #: (see entry_permission). Normally LicenseGate.may_trade_live.
+        self.entry_gate = entry_gate
         self.broker = broker
         self.feed = feed
         self.audit = audit
@@ -256,6 +262,12 @@ class Agent:
         #: strategy opens nothing until a human clears it; positions it already
         #: holds are still managed.
         self._guard_suspended: Dict[str, str] = {}
+        self._licence_block_logged = False
+        #: Insertion order of processed_trades, so the bounded copy written to
+        #: disk keeps the MOST RECENT ids. Sorting the set kept the
+        #: lexicographically largest, which for numeric venue tickets is not
+        #: the newest ("999" sorts after "1000").
+        self._processed_order: deque = deque(maxlen=5000)
         #: The owner's cross-account ledger, when this engine is in a group.
         self._group = None
         if config.ops.group_ledger_dir:
@@ -299,7 +311,8 @@ class Agent:
             "entry_regime": dict(self._entry_regime),
             # Bounded: only the most recent ids are needed to avoid re-autopsying
             # on restart, and an unbounded set would grow without limit.
-            "processed_trades": sorted(self.processed_trades)[-5000:],
+            "processed_trades": self._bounded_processed(),
+            "equity_marks": [[ns, str(eq)] for ns, eq in self._equity_marks],
             "trade_cursor": self._trade_cursor,
             "guard_suspended": dict(self._guard_suspended),
             "saved_ns": self.now(),
@@ -362,7 +375,19 @@ class Agent:
             self.halted = True
             self.halt_reason = data.get("halt_reason", "carried over from a previous run")
         self._entry_regime = dict(data.get("entry_regime") or {})
-        self.processed_trades = set(data.get("processed_trades") or [])
+        ids = [str(x) for x in (data.get("processed_trades") or [])]
+        self.processed_trades = set(ids)
+        self._processed_order.clear()
+        self._processed_order.extend(ids)
+        # The rolling-24h loss window survives a restart. Held only in memory,
+        # a restart -- including a crash loop -- granted a fresh 24h budget
+        # immediately after a loss that had used most of it.
+        self._equity_marks.clear()
+        for row in data.get("equity_marks") or []:
+            try:
+                self._equity_marks.append((int(row[0]), dec(row[1])))
+            except (TypeError, ValueError, IndexError, InvalidOperation):
+                continue
         self._trade_cursor = str(data.get("trade_cursor") or "")
         for sym, meta in (data.get("position_meta") or {}).items():
             self._position_meta[sym] = {
@@ -692,6 +717,21 @@ class Agent:
 
         # --- 7/8/9. signals -> filter -> risk -> act ------------------------ #
         blocked = self.halted or kill_state.engaged
+        permitted, licence_reason = self.entry_permission()
+        if not permitted:
+            blocked = True
+            report.alarms.append({
+                "rule": "licence", "severity": "block", "observed": None, "limit": None,
+                "message": ("no new live positions: " + licence_reason
+                            + " -- open positions are still managed and protected")})
+            if not self._licence_block_logged:
+                self._licence_block_logged = True
+                self.audit.append(EventType.HALT, {
+                    "licence_blocks_entries": licence_reason,
+                    "effect": "no new live entries; exits and protection unaffected"})
+        elif self._licence_block_logged:
+            self._licence_block_logged = False
+            self.audit.append(EventType.MODE_CHANGE, {"licence_entries_restored": True})
         if not blocked and self._in_session(now):
             report.decisions = self._consider_entries(now, snap, ctx, frames,
                                                       correlations=correlations,
@@ -806,12 +846,28 @@ class Agent:
         and the rolling window is what actually bounds the loss.
         """
         cutoff = now_ns - 86_400 * 1_000_000_000
-        self._equity_marks.append((now_ns, equity))
+        # At most one mark per bucket. Appending on every call -- and this is
+        # called on every context rebuild, several times a cycle -- filled the
+        # bounded deque long before 24 hours had passed at a short decision
+        # interval: at 5 s cycles the "24h" window silently covered about
+        # seven hours, and a loss older than that stopped counting.
+        bucket = _EQUITY_MARK_BUCKET_NS
+        if (not self._equity_marks
+                or now_ns // bucket != self._equity_marks[-1][0] // bucket):
+            self._equity_marks.append((now_ns, equity))
         while self._equity_marks and self._equity_marks[0][0] < cutoff:
             self._equity_marks.popleft()
         if not self._equity_marks:
             return ZERO
         return equity - self._equity_marks[0][1]
+
+    def _bounded_processed(self) -> List[str]:
+        """The most recently processed trade ids, oldest first."""
+        order = list(self._processed_order)
+        seen = set(order)
+        # Ids added to the set by anything other than _learn still persist.
+        extra = sorted(t for t in self.processed_trades if t not in seen)
+        return (extra + order)[-5000:]
 
     def _in_session(self, now_ns: int) -> bool:
         dt = datetime.fromtimestamp(now_ns / 1e9, tz=timezone.utc)
@@ -896,15 +952,24 @@ class Agent:
                 commission_per_lot_round_turn=cfg.execution.commission_per_lot_round_turn,
                 slippage_pips_median=cfg.execution.expected_slippage_pips)
 
+        # A period baseline of zero means "not captured yet" (the agent has
+        # not rolled its periods). Measuring against zero read the whole
+        # account as today's profit: +100%, the profit lock latched, and every
+        # entry was refused for a reason that was not true.
+        def _base(value: Decimal) -> Decimal:
+            return value if value > 0 else account.equity
+        day_base = _base(self.day_start_equity)
+        week_base = _base(self.week_start_equity)
+        month_base = _base(self.month_start_equity)
         return RiskContext(
             now_ns=now_ns, account=account, positions=positions, instruments=instruments,
             quotes=snap.quotes, conversions=conversions, equity_peak=self.equity_peak,
-            day_pnl=account.equity - self.day_start_equity,
-            day_start_equity=self.day_start_equity,
-            week_pnl=account.equity - self.week_start_equity,
-            month_pnl=account.equity - self.month_start_equity,
-            week_start_equity=self.week_start_equity,
-            month_start_equity=self.month_start_equity,
+            day_pnl=account.equity - day_base,
+            day_start_equity=day_base,
+            week_pnl=account.equity - week_base,
+            month_pnl=account.equity - month_base,
+            week_start_equity=week_base,
+            month_start_equity=month_base,
             rolling_24h_pnl=self._rolling_24h_pnl(now_ns, account.equity),
             day_profit_locked=self.day_profit_locked,
             ladder_rung=self._ladder_rung,
@@ -1186,7 +1251,16 @@ class Agent:
         if inst is None or quote is None:
             return None
         try:
-            return CostModel(spread_pips=quote.spread_pips(inst))
+            # The operator's verified cost schedule, as everywhere else. The
+            # bare constructor charged the CostModel DEFAULTS (7.00 per lot,
+            # 0.1p slippage) whatever the venue actually costs, so on a
+            # commission-free account the "break-even" stop locked in a small
+            # profit, and above 7.00 it realised a small loss.
+            return CostModel(
+                spread_pips=quote.spread_pips(inst),
+                commission_per_lot_round_turn=(
+                    self.config.execution.commission_per_lot_round_turn),
+                slippage_pips_median=self.config.execution.expected_slippage_pips)
         except Exception:  # noqa: BLE001
             return None
 
@@ -1611,16 +1685,13 @@ class Agent:
             decision.vetoes = [{"rule": "no_market", "message": "no instrument or price"}]
             return decision
 
-        # Lessons inform, they never override.
-        caution, reasons = self.memory.caution_multiplier(
-            strategy=signal.strategy, instrument=signal.instrument, regime=regime_name)
+        # Lessons inform, they never override. News can only shrink.
+        caution, reasons = self._caution_for(signal.strategy, signal.instrument,
+                                             regime_name)
         decision.lessons = reasons
-        # News can only shrink. The clamp below makes that structural rather
-        # than a property of whoever wrote the policy.
-        assessment = self._news_assessment.get(signal.instrument)
-        if assessment is not None and assessment.size_multiplier < D("1"):
-            caution = float(min(dec(caution), assessment.size_multiplier))
-            decision.lessons.extend(assessment.reasons[:2])
+        # Carried on the decision so a proposal accepted later by a human is
+        # sized with the same shrinkage the agent applied when it made it.
+        meta_diag: Dict[str, Any] = {}
 
         # The meta-label gate: whether to act on THIS primary signal at all,
         # from the state it was raised in. It runs before the risk engine so a
@@ -1634,11 +1705,12 @@ class Agent:
                 context = bar_context_features(frame, len(frame) - 1) \
                     if frame is not None and len(frame) else {}
                 act, p, scale = self.meta_gate.decide(signal, context)
-                decision.diagnostics["meta_features"] = {
+                meta_diag["meta_features"] = {
                     **{f"sig_{k}": float(v) for k, v in (signal.features or {}).items()},
                     "strength": float(signal.strength), **context}
                 if p is not None:
-                    decision.diagnostics["meta_probability"] = round(float(p), 4)
+                    meta_diag["meta_probability"] = round(float(p), 4)
+                decision.diagnostics.update(meta_diag)
                 if not act:
                     decision.action = "skipped"
                     decision.vetoes = [{"rule": "meta_label",
@@ -1691,7 +1763,15 @@ class Agent:
         verdict: RiskDecision = self.risk.evaluate_entry(intent, ctx)
         decision.vetoes = [v.to_dict() for v in verdict.vetoes]
         decision.warnings = [w.to_dict() for w in verdict.warnings]
-        decision.diagnostics = dict(verdict.diagnostics)
+        # MERGE, do not replace. Assigning the engine's diagnostics wholesale
+        # erased the meta-label probability and features recorded a few lines
+        # above, so every approved or vetoed decision reached the dashboard
+        # with no trace of the filter that had just scored it.
+        decision.diagnostics = {**meta_diag, **dict(verdict.diagnostics)}
+        decision.diagnostics["caution_multiplier"] = round(float(caution), 4)
+        if getattr(signal, "horizon_bars", 0):
+            decision.diagnostics["horizon_bars"] = int(signal.horizon_bars)
+            decision.diagnostics["timeframe"] = signal.timeframe
         decision.stop = str(intent.stop_loss)
         decision.target = str(intent.take_profit) if intent.take_profit else None
         decision.entry = str(quote.price_for(signal.side))
@@ -1747,6 +1827,45 @@ class Agent:
             return decision
 
         return self._execute(intent, decision, quote)
+
+    def _caution_for(self, strategy: str, instrument: str,
+                     regime_name: str) -> tuple[float, List[str]]:
+        """The size multiplier from lessons and news, in [0, 1], with reasons.
+
+        One function for the agent's own entries AND for a human accepting a
+        proposal later, so the two cannot drift apart. Both inputs can only
+        shrink a position: lessons are capped at 1.0 by the memory store, and
+        the news multiplier is clamped here.
+        """
+        caution, reasons = self.memory.caution_multiplier(
+            strategy=strategy, instrument=instrument, regime=regime_name)
+        reasons = list(reasons)
+        assessment = self._news_assessment.get(instrument)
+        if assessment is not None and assessment.size_multiplier < D("1"):
+            caution = float(min(dec(caution), assessment.size_multiplier))
+            reasons.extend(assessment.reasons[:2])
+        return max(0.0, min(1.0, float(caution))), reasons
+
+    def entry_permission(self) -> tuple[bool, str]:
+        """May NEW risk be opened right now, as far as the licence is concerned?
+
+        The licence gate used to be consulted once, at boot. A licence that
+        expired while the process stayed up kept authorising live entries until
+        the next restart -- months, on a stable server -- although the gate
+        itself re-evaluates every 15 minutes and the dashboard said "expired".
+        The question is now asked on every cycle, and on every human path that
+        opens a position. Only NEW risk is refused; exits and protection are
+        never gated by a licence.
+        """
+        if self.config.execution.venue_mode is not ExecutionVenueMode.LIVE:
+            return True, ""
+        if self.entry_gate is None:
+            return True, ""
+        try:
+            allowed, why = self.entry_gate()
+        except Exception as exc:  # noqa: BLE001 - an unanswerable gate is a closed gate
+            return False, f"the licence gate could not be evaluated ({exc})"
+        return bool(allowed), str(why or "")
 
     def _realised_risk(self, intent: OrderIntent, order) -> Decimal:
         """Risk of the position the venue actually opened.
@@ -1924,6 +2043,29 @@ class Agent:
                       None)
         if target is None:
             return None
+        permitted, why = self.entry_permission()
+        if not permitted:
+            self.audit.append(EventType.PROPOSAL_REJECTED,
+                              {"client_order_id": client_order_id,
+                               "reason": f"licence: {why}"}, actor=by)
+            target.action = "vetoed"
+            target.vetoes.append({"rule": "licence", "message": why, "severity": "block"})
+            return target
+        if target.strategy in self._guard_suspended:
+            # The performance guard suspended this strategy after the proposal
+            # was queued. A proposal is the strategy's idea; a strategy whose
+            # realised R is demonstrably negative does not get to place it
+            # through the back door of a human click.
+            self._advisory_queue.remove(target)
+            self.audit.append(EventType.PROPOSAL_REJECTED,
+                              {"client_order_id": client_order_id,
+                               "reason": "strategy suspended by the performance guard"},
+                              actor=by)
+            target.action = "vetoed"
+            target.vetoes.append({
+                "rule": "performance_guard",
+                "message": self._guard_suspended[target.strategy], "severity": "block"})
+            return target
         if not self._in_session(self.now()):
             # The agent itself would not enter now; a human clicking "accept"
             # at 03:00 on a Sunday does not change what the session rule is for.
@@ -1949,13 +2091,20 @@ class Agent:
         ctx = self._build_context(self.now(), account,
                                   self._hydrate(self.broker.positions()), snap,
                                   self.health.connected, self.health.snapshot())
+        horizon = target.diagnostics.get("horizon_bars") if target.diagnostics else None
         intent = OrderIntent(
             client_order_id=target.client_order_id, strategy=target.strategy,
             instrument=target.instrument, side=Side(target.side),
             lots=dec(target.lots or inst.min_lot),
             stop_loss=dec(target.stop) if target.stop else None,
             take_profit=dec(target.target) if target.target else None,
-            reason="human-accepted advisory proposal")
+            decision_ns=target.ts_ns,
+            reason="human-accepted advisory proposal",
+            # The horizon travels with the proposal, so a trade a human
+            # accepted still gets the time stop its strategy was tested with.
+            metadata=({"horizon_bars": int(horizon),
+                       "timeframe": target.diagnostics.get("timeframe")}
+                      if horizon else {}))
         verdict = self.risk.evaluate_entry(intent, ctx)
         self.audit.append(EventType.PROPOSAL_ACCEPTED,
                           {"client_order_id": client_order_id,
@@ -1965,9 +2114,195 @@ class Agent:
             target.action = "vetoed"
             target.vetoes = [v.to_dict() for v in verdict.vetoes]
             return target
-        intent.lots = verdict.approved_lots
-        intent.risk_amount = verdict.risk_amount
+        # The SAME shrinkage the agent would apply, recomputed now and never
+        # looser than when the proposal was made. The engine sizes from the
+        # full per-trade budget, so assigning its lots directly let a human
+        # click place a position up to 1/caution times larger than the agent
+        # itself would have: every lesson, news advisory and meta-label scale
+        # that had shrunk the proposal was silently discarded on acceptance.
+        regime_name = self.regime.regime.value if self.regime else ""
+        fresh, reasons = self._caution_for(target.strategy, target.instrument, regime_name)
+        try:
+            proposed = float(target.diagnostics.get("caution_multiplier", 1.0))
+        except (TypeError, ValueError):
+            proposed = 1.0
+        caution = max(0.0, min(1.0, fresh, proposed))
+        lots = inst.round_lots_down(verdict.approved_lots * dec(caution))
+        if lots < inst.min_lot:
+            target.action = "vetoed"
+            target.vetoes.append({
+                "rule": "caution_multiplier",
+                "message": (f"lessons and news reduce the size to {lots} lots, below the "
+                            f"{inst.min_lot} minimum"),
+                "severity": "block"})
+            target.lessons = reasons
+            return target
+        intent.lots = lots
+        intent.risk_amount = verdict.risk_amount * dec(caution)
+        intent.risk_pct = verdict.risk_pct * dec(caution)
+        intent.expected_cost_pips = verdict.expected_cost_pips
+        target.lots = str(lots)
+        target.risk_amount = str(intent.risk_amount)
+        target.risk_pct = str(intent.risk_pct)
+        target.diagnostics["caution_multiplier"] = round(caution, 4)
         return self._execute(intent, target, quote)
+
+    # ------------------------------------------------------------------ #
+    # manual trading
+    # ------------------------------------------------------------------ #
+
+    MANUAL_STRATEGY = "manual"
+
+    def manual_order(self, *, instrument: str, side: str, stop_loss: Decimal,
+                     take_profit: Optional[Decimal], by: str,
+                     risk_pct: Optional[Decimal] = None,
+                     preview: bool = False) -> Decision:
+        """A human's own trade, through the same gates as the agent's.
+
+        The ticket names the instrument, the side, the stop (required) and
+        optionally a target and a LOWER risk percentage. Everything else is the
+        system's: the size comes from the risk budget, and every veto the
+        engine has -- loss budgets, drawdown ladder, news blackout, spread,
+        exposure, margin, the unprotected-book rule -- applies unchanged. There
+        is no override. The only thing a human ticket is excused from is the
+        strategy LIFECYCLE rule, and with real money only when the owner has
+        turned ``agent.manual_trading_live`` on.
+
+        ``preview=True`` evaluates everything and sends nothing.
+        """
+        now = self.now()
+        decision = Decision(ts_ns=now, strategy=self.MANUAL_STRATEGY,
+                            instrument=instrument, action="skipped", side=side,
+                            rationale=f"manual ticket by {by}")
+        try:
+            side_enum = Side(str(side).upper())
+        except ValueError:
+            decision.vetoes = [{"rule": "malformed_ticket",
+                                "message": "side must be BUY or SELL", "severity": "block"}]
+            return decision
+        live = self.config.execution.venue_mode is ExecutionVenueMode.LIVE
+        if live and not self.config.agent.manual_trading_live:
+            decision.action = "vetoed"
+            decision.vetoes = [{
+                "rule": "manual_live_disabled",
+                "message": ("manual trades with real money are switched off; the owner "
+                            "must enable agent.manual_trading_live first"),
+                "severity": "block"}]
+            return decision
+        permitted, why = self.entry_permission()
+        if not permitted:
+            decision.action = "vetoed"
+            decision.vetoes = [{"rule": "licence", "message": why, "severity": "block"}]
+            return decision
+        if not self._in_session(now):
+            decision.action = "vetoed"
+            decision.vetoes = [{
+                "rule": "out_of_session",
+                "message": ("entries are not permitted at this hour/day; the permitted "
+                            "hours are agent.session_windows_utc and agent.trade_days"),
+                "severity": "block"}]
+            return decision
+
+        snap = self.feed.snapshot([instrument], now_ns=now)
+        quote = snap.quotes.get(instrument)
+        inst = self.broker.instruments().get(instrument)
+        if quote is None or inst is None:
+            decision.action = "vetoed"
+            decision.vetoes = [{"rule": "no_market",
+                                "message": f"no instrument or live price for {instrument}",
+                                "severity": "block"}]
+            return decision
+        ctx = self._build_context(now, self.broker.account(),
+                                  self._hydrate(self.broker.positions()), snap,
+                                  self.health.connected, self.health.snapshot())
+        # The ticket is judged as an accepted strategy ONLY for the lifecycle
+        # rule, and only when the checks above allowed a manual ticket at all.
+        ctx.strategy_lifecycles = {**ctx.strategy_lifecycles,
+                                   self.MANUAL_STRATEGY: "accepted"}
+        coid = client_order_id(strategy=self.MANUAL_STRATEGY, instrument=instrument,
+                               side=side_enum.value, decision_ns=now,
+                               account=ctx.account.account_id)
+        decision.client_order_id = coid
+        try:
+            intent = OrderIntent(
+                client_order_id=coid, strategy=self.MANUAL_STRATEGY, instrument=instrument,
+                side=side_enum, lots=inst.min_lot,
+                stop_loss=inst.round_price(dec(stop_loss)),
+                take_profit=inst.round_price(dec(take_profit)) if take_profit else None,
+                decision_ns=now, reason=f"manual ticket by {by}"[:100])
+        except (ValueError, InvalidOperation) as exc:
+            decision.action = "vetoed"
+            decision.vetoes = [{"rule": "malformed_ticket", "message": str(exc),
+                                "severity": "block"}]
+            return decision
+
+        verdict = self.risk.evaluate_entry(intent, ctx)
+        decision.vetoes = [v.to_dict() for v in verdict.vetoes]
+        decision.warnings = [w.to_dict() for w in verdict.warnings]
+        decision.diagnostics = dict(verdict.diagnostics)
+        decision.entry = str(quote.price_for(side_enum))
+        decision.stop = str(intent.stop_loss)
+        decision.target = str(intent.take_profit) if intent.take_profit else None
+        if not verdict.approved:
+            decision.action = "vetoed"
+            decision.explanation = "; ".join(
+                f"{v.rule}: {v.message}" for v in verdict.vetoes[:4])
+            if not preview:
+                self.audit.append(EventType.RISK_VETO, {**decision.to_dict(),
+                                                        "manual": True}, actor=by)
+            return decision
+
+        # A human may ask for LESS risk than the budget, never more. News and
+        # lessons shrink a manual ticket exactly as they shrink the agent's.
+        regime_name = self.regime.regime.value if self.regime else ""
+        caution, reasons = self._caution_for(self.MANUAL_STRATEGY, instrument, regime_name)
+        budget = self.config.risk.risk_per_trade_pct
+        if risk_pct is not None:
+            wanted = dec(risk_pct)
+            if wanted <= 0:
+                decision.action = "vetoed"
+                decision.vetoes = [{"rule": "malformed_ticket",
+                                    "message": "risk must be greater than zero",
+                                    "severity": "block"}]
+                return decision
+            if wanted < budget:
+                caution = min(caution, float(wanted / budget))
+                reasons.append(f"risk lowered by the ticket to {wanted}%")
+        lots = inst.round_lots_down(verdict.approved_lots * dec(caution))
+        decision.lessons = reasons
+        decision.diagnostics["caution_multiplier"] = round(caution, 4)
+        if lots < inst.min_lot:
+            decision.action = "vetoed"
+            decision.vetoes.append({
+                "rule": "caution_multiplier",
+                "message": f"the requested risk sizes to {lots} lots, below the "
+                           f"{inst.min_lot} minimum",
+                "severity": "block"})
+            return decision
+        intent.lots = lots
+        intent.risk_amount = verdict.risk_amount * dec(caution)
+        intent.risk_pct = verdict.risk_pct * dec(caution)
+        intent.expected_cost_pips = verdict.expected_cost_pips
+        decision.lots = str(lots)
+        decision.risk_amount = str(intent.risk_amount)
+        decision.risk_pct = str(intent.risk_pct)
+        be = verdict.break_even_win_rate
+        decision.explanation = (
+            f"manual {side_enum.value} {instrument}: {lots} lots, risk "
+            f"{float(intent.risk_pct):.2f}% of equity"
+            + (f"; needs {float(be) * 100:.1f}% wins to break even after costs"
+               if be is not None else ""))
+        if preview:
+            decision.action = "preview"
+            return decision
+        self.audit.append(EventType.PROPOSAL_ACCEPTED, {
+            "manual_ticket": True, "client_order_id": coid, "instrument": instrument,
+            "side": side_enum.value, "lots": str(lots), "stop": str(intent.stop_loss),
+            "target": str(intent.take_profit) if intent.take_profit else None,
+            "risk_pct": str(intent.risk_pct)}, actor=by)
+        result = self._execute(intent, decision, quote)
+        self.decisions.append(result)
+        return result
 
     def reject_advice(self, client_order_id: str, by: str, reason: str = "") -> bool:
         target = next((d for d in self._advisory_queue if d.client_order_id == client_order_id),
@@ -2138,6 +2473,7 @@ class Agent:
             if trade.trade_id in self.processed_trades:
                 continue
             self.processed_trades.add(trade.trade_id)
+            self._processed_order.append(trade.trade_id)
             if not trade.regime:
                 # Entry-time regime, captured when the position was opened.
                 trade.regime = self._entry_regime.get(trade.instrument, "")

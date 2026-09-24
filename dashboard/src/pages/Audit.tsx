@@ -32,6 +32,7 @@ const EVENT_FA: Record<string, string> = {
   "research.run": "یک اجرای پژوهشی", "research.verdict": "حکم نهایی یک آزمون",
   "sec.auth_ok": "ورود موفق", "sec.auth_fail": "تلاش ناموفق برای ورود",
   "sec.write_action": "یک تغییر انجام شد", "sec.write_denied": "یک تلاش برای تغییر رد شد",
+  "ai.call": "یک درخواست به هوش مصنوعی",
 };
 
 const CRITICAL = new Set([

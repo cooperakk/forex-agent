@@ -88,6 +88,15 @@ class Runtime:
         self._connections = None
         self._secrets = None
         self._secrets_error = ""
+        # Optional assistants, wired by bootstrap. Each runs on the background
+        # worker, never on the decision thread, and each can only inform a
+        # human or shrink risk.
+        self.ai = None           # sentinel.ai.AIService
+        self.news_desk = None    # sentinel.news.desk.NewsDesk
+        self.coach = None        # sentinel.ai.coach.TradeCoach
+        self._bg_thread: Optional[threading.Thread] = None
+        self.background_errors: List[str] = []
+        self.background_last_ns: int = 0
 
     # -- venue configuration -------------------------------------------------- #
 
@@ -420,6 +429,32 @@ class Runtime:
             self._thread = threading.Thread(target=loop, name="agent-loop", daemon=True)
             self._thread.start()
 
+            if self.news_desk is not None or self.coach is not None:
+                def background() -> None:
+                    # First pass soon after start, then once a minute; each
+                    # assistant decides for itself whether it is due.
+                    delay = 5.0
+                    while not self._stop.wait(delay):
+                        delay = 60.0
+                        self.background_tick()
+
+                self._bg_thread = threading.Thread(target=background,
+                                                   name="assistants", daemon=True)
+                self._bg_thread.start()
+
+    def background_tick(self) -> None:
+        """One pass of the news desk and the coach. Never takes the trading lock."""
+        self.background_last_ns = wall_ns()
+        for name, step in (("news", getattr(self.news_desk, "tick", None)),
+                           ("coach", getattr(self.coach, "tick", None))):
+            if step is None:
+                continue
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 - an assistant must never stop anything
+                msg = f"{name}: {type(exc).__name__}: {exc}"[:300]
+                self.background_errors = (self.background_errors + [msg])[-20:]
+
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
@@ -519,6 +554,12 @@ class Runtime:
                 "supports_transaction_stream": caps.supports_transaction_stream,
                 "degradations": caps.degradation_report(),
             },
+            # Strategies the performance guard has suspended, with the reason.
+            # They open nothing until the owner releases them, so an operator
+            # who cannot see this list sees a strategy that has simply gone
+            # quiet.
+            "guard_suspended": agent.guard_suspended,
+            "entries_permitted": self._entries_permitted(),
             "unresolved_orders": len(agent.oms.unresolved),
             "quarantined": sorted(agent.oms.quarantined),
             "advisory_pending": len(agent.pending_advice()),
@@ -526,6 +567,13 @@ class Runtime:
             "config_version": cfg.version,
             "errors": self.errors[-5:],
         }
+
+    def _entries_permitted(self) -> Dict[str, Any]:
+        try:
+            allowed, why = self.agent.entry_permission()
+        except Exception as exc:  # noqa: BLE001
+            allowed, why = False, str(exc)
+        return {"allowed": bool(allowed), "reason": why}
 
     def positions(self) -> List[dict]:
         out: List[dict] = []
@@ -737,6 +785,7 @@ class Runtime:
                 failed.append({"instrument": pos.instrument,
                                "error": res.reject_reason or res.state.value})
         remaining = [p.instrument for p in self.agent.broker.positions()]
+        self._forget_closed(remaining)
         self.agent.audit.append(EventType.POSITION_CLOSE,
                                 {"action": "flatten_all", "closed": closed,
                                  "failed": failed, "still_open": remaining}, actor=by)
@@ -762,7 +811,44 @@ class Runtime:
             self.agent.audit.append(EventType.POSITION_CLOSE,
                                     {"instrument": instrument, "lots": lots,
                                      "state": res.state.value}, actor=by)
+            if res.state in (OrderState.FILLED, OrderState.PARTIAL):
+                try:
+                    remaining = [p.instrument for p in self.agent.broker.positions()]
+                except Exception:  # noqa: BLE001 - the next reconcile will settle it
+                    remaining = None
+                if remaining is not None:
+                    self._forget_closed(remaining)
         return {"state": res.state.value, "reason": res.reject_reason}
+
+    def manual_order(self, *, instrument: str, side: str, stop_loss, take_profit,
+                     risk_pct, by: str, preview: bool) -> dict:
+        from ..core.money import dec as _dec
+        with self._lock:
+            decision = self.agent.manual_order(
+                instrument=instrument, side=side, stop_loss=_dec(stop_loss),
+                take_profit=_dec(take_profit) if take_profit not in (None, "") else None,
+                risk_pct=_dec(risk_pct) if risk_pct not in (None, "") else None,
+                by=by, preview=preview)
+        return decision.to_dict()
+
+    def _forget_closed(self, still_open: List[str]) -> None:
+        """Drop the agent's metadata for positions a human just closed.
+
+        Left in place, the next reconciliation compared the agent's book --
+        still holding the closed position -- against the venue and journalled
+        a `phantom` mismatch for every manual close, burying real mismatches
+        in noise an operator learns to ignore.
+        """
+        live = set(still_open)
+        meta = getattr(self.agent, "_position_meta", None)
+        if not isinstance(meta, dict):
+            return
+        for sym in [k for k in meta if k not in live]:
+            meta.pop(sym, None)
+        try:
+            self.agent._save_state()
+        except Exception:  # noqa: BLE001
+            pass
 
     # Fields that a config write may never change, because each has its own
     # endpoint with its own guard. Routing them through the generic config patch
@@ -802,6 +888,20 @@ class Runtime:
         ("security", "allowed_origins"): "CORS is fixed at startup",
         ("security", "session_ttl_minutes"): "session lifetime is fixed at startup",
         ("security", "dashboard_read_only_default"): "fixed at startup",
+        # Filesystem locations that the process LOADS or WRITES. Each is a
+        # restart-only, server-side setting, because through the dashboard
+        # each one is an escalation from "owner of the console" to "code
+        # execution on the server": the meta model is a joblib (pickle) file
+        # that is unpickled at startup, the plugin directory is imported as
+        # Python, and the data paths decide where SQLite and backups write.
+        ("agent", "meta_model_path"): "the meta-label model is unpickled at startup; "
+                                      "set it in the config file on the server",
+        ("ops", "strategy_plugin_dir"): "plugin files are imported as Python code; set "
+                                        "the directory on the server",
+        ("ops", "backup_dir"): "the backup location is fixed at startup",
+        ("ops", "group_ledger_dir"): "the cross-account ledger location is fixed at "
+                                     "startup",
+        ("data", "store_path"): "the market-data store location is fixed at startup",
     }
 
     def _guard_privileged_fields(self, current: SentinelConfig,
