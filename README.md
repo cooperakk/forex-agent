@@ -8,7 +8,7 @@
 *An autonomous FX trading agent built around capital preservation,
 statistical honesty, and a tamper-evident audit trail.*
 
-`Python 3.11+` · `FastAPI` · `React + TypeScript` · `900 tests`
+`Python 3.11+` · `FastAPI` · `React + TypeScript` · `958 tests`
 
 </div>
 
@@ -87,7 +87,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt   # runtime + test deps
 cd dashboard && npm ci && npm run build && cd ..
 
-.venv/bin/python -m pytest -q        # انتظار: 900 passed (+2 permission tests that need POSIX)
+.venv/bin/python -m pytest -q        # انتظار: 958 passed (+2 permission tests that need POSIX)
 
 cp .env.example .env && chmod 600 .env
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # SENTINEL_JWT_SECRET
@@ -210,7 +210,7 @@ result and is left in place deliberately.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # runtime + test deps
 cd dashboard && npm ci && npm run build && cd ..
-.venv/bin/python -m pytest -q          # 900 passed (+2 POSIX-only permission tests)
+.venv/bin/python -m pytest -q          # 958 passed (+2 POSIX-only permission tests)
 cp .env.example .env && chmod 600 .env && $EDITOR .env
 set -a && . ./.env && set +a && .venv/bin/python scripts/serve.py
 ```
@@ -246,7 +246,7 @@ scripts/       serve · run_acceptance · run_paper_sim · manage_users ·
 deploy/        systemd units · nginx · backup ·
                scripts/ (install, update, restore, healthcheck, uninstall)
 docs/          architecture · security · acceptance protocol · deployment
-tests/         900 tests, including a regression for every audit finding
+tests/         958 tests, including a regression for every audit finding
 ```
 
 ### Commands

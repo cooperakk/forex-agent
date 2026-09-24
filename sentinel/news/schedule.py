@@ -347,3 +347,84 @@ class IngestReport:
                 "rescheduled": self.rescheduled, "unchanged": self.unchanged,
                 "updated": self.updated, "rejected": self.rejected,
                 "errors": self.errors[:10], "advisories": self.advisories[:20]}
+
+
+class HistoricalCalendarSource:
+    """Dated releases from a CSV, for research replay and for backfilling.
+
+    The bundled schedule is a PATTERN -- roughly the right week, never a
+    confirmed date -- and the replay engine needs the calendar as it actually
+    stood: NFP on the 5th because the 1st was a holiday, the ECB moved to
+    Thursday, the CPI that printed at 08:30 New York on a Tuesday. A row per
+    release, with the instant it happened in UTC, is all that takes.
+
+    Columns (header required, others ignored)::
+
+        timestamp_utc,currency,name,impact[,series_id][,period][,actual][,consensus]
+
+    ``impact`` is high|medium|low. ``series_id`` lets a rescheduled row update
+    the same event instead of opening a second window; when absent, it is
+    derived from currency and name. Every row is ``confirmed`` -- this file is
+    the operator's statement of what happened, and it is hashed into the
+    dataset manifest so the acceptance record names it.
+    """
+
+    name = "historical_csv"
+
+    def __init__(self, path: str | Path) -> None:
+        import csv as _csv
+        self.path = Path(path)
+        self.rows: list[dict[str, Any]] = []
+        with open(self.path, encoding="utf-8", newline="") as fh:
+            reader = _csv.DictReader(fh)
+            required = {"timestamp_utc", "currency", "name", "impact"}
+            if not required <= set(reader.fieldnames or []):
+                raise ValueError(f"{self.path}: columns {sorted(required)} are required")
+            for line, row in enumerate(reader, start=2):
+                stamp = pd_to_ns(row["timestamp_utc"])
+                if stamp is None:
+                    raise ValueError(f"{self.path}:{line}: unparseable timestamp_utc")
+                currency = (row["currency"] or "").strip().upper()
+                name = (row["name"] or "").strip()
+                impact = (row["impact"] or "medium").strip().lower()
+                if not currency or not name or impact not in ("high", "medium", "low"):
+                    raise ValueError(f"{self.path}:{line}: currency, name and impact are required")
+                series = (row.get("series_id") or f"{currency}:{name}").strip()
+                period = (row.get("period") or dt.datetime.fromtimestamp(
+                    stamp / 1e9, tz=dt.UTC).strftime("%Y-%m")).strip()
+                self.rows.append({
+                    "event_id": f"{series}:{period}:{stamp}",
+                    "series_id": series, "event_ns": stamp,
+                    "country": currency, "currency": currency, "name": name,
+                    "curated_impact": impact, "period": period, "zone": "UTC",
+                    "certainty": "confirmed", "source": self.name,
+                    "actual": _float_or_none(row.get("actual")),
+                    "consensus": _float_or_none(row.get("consensus")),
+                })
+        self.rows.sort(key=lambda e: e["event_ns"])
+
+    def fetch(self, start_ns: int, end_ns: int) -> list[dict[str, Any]]:
+        return [dict(e) for e in self.rows if start_ns <= e["event_ns"] <= end_ns]
+
+
+def pd_to_ns(text: str) -> int | None:
+    """An ISO-8601 or 'YYYY-MM-DD HH:MM' timestamp, UTC, as nanoseconds."""
+    value = (text or "").strip()
+    if not value:
+        return None
+    try:
+        import pandas as pd
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return int(ts.tz_convert("UTC").as_unit("ns").value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _float_or_none(text: Any) -> float | None:
+    try:
+        v = float(str(text).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if v == v else None

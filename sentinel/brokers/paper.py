@@ -694,7 +694,12 @@ class PaperBroker(Broker):
         dt = datetime.fromtimestamp(self._now_ns / 1e9, tz=timezone.utc)
         # The venue's value date rolls at 17:00 New York, i.e. 21:00/22:00 UTC.
         # A quote before that hour belongs to the previous value date.
-        value_date = (dt - timedelta(hours=21)).date()
+        # The rollover is 17:00 New York, which is 21:00 UTC in summer and
+        # 22:00 in winter. A fixed 21-hour shift put the Wednesday triple swap
+        # on Thursday for half the year. tzrules carries the DST arithmetic.
+        from ..core.tzrules import utc_offset_hours
+        ny_offset = utc_offset_hours("America/New_York", dt.replace(tzinfo=None))
+        value_date = (dt - timedelta(hours=17 - ny_offset)).date()
         day = value_date.toordinal()
         if self._last_rollover_day is None:
             self._last_rollover_day = day

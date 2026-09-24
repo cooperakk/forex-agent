@@ -307,7 +307,33 @@ def build_runtime(config_path: str | Path = "var/config.json",
                     "environment, or saved against an enabled broker connection "
                     "in the dashboard. Credentials are never read from a config "
                     "file or the repository.")
+        # The MT5 intent journal lives in the state directory, beside the
+        # audit chain: it is what resolves an UNKNOWN order after a restart.
+        from .brokers.profiles import resolve_profile as _resolve
+        _prof = _resolve(config.execution.broker)
+        if (_prof.adapter if _prof else config.execution.broker) == "mt5":
+            connection_kwargs.setdefault("state_path", str(state_dir / "mt5-intents.json"))
         broker = build_broker(config.execution.broker, **connection_kwargs)
+        # Bind the adapter to the declared account. From here on every call
+        # re-checks the venue's own statement of identity, so a terminal that
+        # someone signs into another account stops receiving orders instead of
+        # receiving them for the wrong book.
+        if config.execution.expected_account_id:
+            from .brokers.bound import AccountBoundBroker
+            broker = AccountBoundBroker(
+                broker, config.execution.expected_account_id,
+                config.execution.venue_mode.value, config.execution.account_currency,
+                config.execution.expected_account_server)
+            audit.append(EventType.SYSTEM_START,
+                         {"account_bound": broker.bound_to}, actor="bootstrap")
+        elif config.execution.venue_mode is ExecutionVenueMode.LIVE:
+            raise RuntimeError(
+                "live trading needs execution.expected_account_id so the engine can "
+                "refuse to route orders when the terminal's account changes")
+        else:
+            print("[bootstrap] WARNING: no expected_account_id -- the engine will trade "
+                  "whichever account the terminal is signed into. Set it before demo "
+                  "testing with real broker credentials.")
 
     store = BarStore(config.data.store_path)
     # The paper venue has no price source of its own: it is a fill engine. The

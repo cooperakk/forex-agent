@@ -1,0 +1,48 @@
+[Unit]
+Description=Sentinel-FX engine for account %i
+Documentation=file:/opt/sentinel-fx/docs/MULTI-ACCOUNT-FA.md
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+# Five failures in ten minutes stops the unit for a human. A crash loop on a
+# trading process is a resubmission loop.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+WorkingDirectory=/opt/sentinel-fx
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=UTC
+# The account's environment.json is loaded by run_account.py itself, so no
+# EnvironmentFile here: one account's secrets never enter another's unit.
+ExecStart=/opt/sentinel-fx/.venv/bin/python scripts/run_account.py %i --root /var/lib/sentinel/accounts --console
+KillSignal=SIGTERM
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+ReadWritePaths=/var/lib/sentinel/accounts/%i /var/lib/sentinel/group
+LimitNOFILE=8192
+OOMPolicy=stop
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel-%i
+
+[Install]
+WantedBy=multi-user.target

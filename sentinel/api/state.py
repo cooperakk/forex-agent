@@ -777,6 +777,11 @@ class Runtime:
                                      "promote them first",
         ("execution", "broker"): "changing the venue adapter requires a restart with "
                                  "the corresponding credentials in the environment",
+        ("execution", "expected_account_id"): "the account binding is fixed at startup; "
+                                              "a different account is a different engine",
+        ("execution", "expected_account_server"): "the account binding is fixed at startup",
+        ("execution", "account_currency"): "the account currency is fixed at startup; "
+                                           "every open risk figure is denominated in it",
         # Forensic and security settings. These are restart-only, file-edited
         # settings -- not dashboard settings -- and each one is an escalation:
         # relocating the kill file silently discards a persisted engagement,
@@ -835,25 +840,28 @@ class Runtime:
             name = alloc.get("name")
             if alloc.get("lifecycle") != "accepted":
                 continue
+            # The fingerprint now covers the runtime policy, so a write that
+            # changes a risk limit beside an accepted strategy re-checks that
+            # strategy against the registry -- there is no "unchanged"
+            # short-circuit, because the thing that changed may be the policy.
             fingerprint = config_fingerprint(alloc.get("instruments"),
                                              alloc.get("params"),
-                                             alloc.get("timeframe"))
-            prior = before.get(name, {})
-            unchanged = (
-                prior.get("lifecycle") == "accepted"
-                and prior.get("acceptance_run_id") == alloc.get("acceptance_run_id")
-                # The short-circuit is only safe while the CONFIGURATION is also
-                # unchanged. Checking the run id alone let an accepted strategy
-                # have its instruments and parameters swapped wholesale while
-                # keeping a badge earned by something else.
-                and config_fingerprint(prior.get("instruments"), prior.get("params"),
-                                       prior.get("timeframe")) == fingerprint
-            )
-            if unchanged:
-                continue
+                                             alloc.get("timeframe"),
+                                             runtime_config=merged)
             ok, why = self.verdicts.authorises(name, alloc.get("acceptance_run_id"),
                                                config_hash=fingerprint)
             if not ok:
+                prior = before.get(name, {})
+                if prior.get("lifecycle") == "accepted" and                         prior.get("acceptance_run_id") == alloc.get("acceptance_run_id"):
+                    # The allocation is untouched, so what changed is the
+                    # runtime policy the verdict was earned under. Say that,
+                    # and say what to do: demote first, or re-run acceptance.
+                    raise ValueError(
+                        f"this change alters the runtime policy (risk limits, execution, "
+                        f"news or research settings) that {name!r} was accepted under; "
+                        f"the verdict no longer describes what would run. Set the strategy "
+                        f"to 'suspended' first, apply the change, and re-run the acceptance "
+                        f"protocol on the new configuration. ({why})")
                 raise ValueError(f"refusing to promote {name!r} to accepted: {why}")
 
     def update_config(self, patch: Dict[str, Any], by: str,

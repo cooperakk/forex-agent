@@ -151,13 +151,19 @@ class MetaLabeler:
 
         calibrated = False
         model = base
-        if len(y_va) >= 50:
+        # Calibrate on one half of the validation rows and evaluate on the
+        # other. Fitting the isotonic map on the same rows the threshold is
+        # then tuned on made the calibration look perfect by construction.
+        calibration_cut = len(y_va) // 2
+        X_cal, y_cal = X_va[:calibration_cut], y_va[:calibration_cut]
+        X_va, y_va = X_va[calibration_cut:], y_va[calibration_cut:]
+        if len(y_cal) >= 50 and len(np.unique(y_cal)) == 2:
             try:
                 wrapped = FrozenEstimator(base) if _FROZEN else base
                 model = (CalibratedClassifierCV(wrapped, method="isotonic")
                          if _FROZEN else
                          CalibratedClassifierCV(base, method="isotonic", cv="prefit"))
-                model.fit(X_va, y_va)
+                model.fit(X_cal, y_cal)
                 calibrated = True
             except (ValueError, RuntimeError, TypeError) as exc:  # pragma: no cover
                 model = base

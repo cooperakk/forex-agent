@@ -19,6 +19,7 @@ Three rules, enforced here:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -54,6 +55,13 @@ CREATE TABLE IF NOT EXISTS bars (
     PRIMARY KEY (instrument, timeframe, start_ns)
 );
 CREATE INDEX IF NOT EXISTS idx_bars_lookup ON bars(instrument, timeframe, start_ns DESC);
+CREATE TABLE IF NOT EXISTS bar_features (
+    instrument TEXT NOT NULL,
+    timeframe  TEXT NOT NULL,
+    start_ns   INTEGER NOT NULL,
+    payload    TEXT NOT NULL,
+    PRIMARY KEY (instrument, timeframe, start_ns)
+);
 """
 
 
@@ -74,7 +82,8 @@ class DataPassport:
         return {"instrument": self.instrument, "timeframe": self.timeframe,
                 "source": self.source, "bars": self.bars,
                 "first_ns": self.first_ns, "last_ns": self.last_ns,
-                "age_sec": round(self.age_sec, 1), "gaps": self.gaps,
+                "age_sec": (round(self.age_sec, 1) if np.isfinite(self.age_sec) else None),
+                "gaps": self.gaps,
                 "quality": self.quality.value,
                 "expected_interval_sec": self.expected_interval_sec}
 
@@ -115,6 +124,40 @@ class BarStore:
             self._conn.commit()
         return len(rows)
 
+    def upsert_frame(self, frame: pd.DataFrame, instrument: str, timeframe: str,
+                     source: str = "import") -> int:
+        """Store a validated frame, keeping the columns beyond OHLCV.
+
+        Bid/ask OHLC, ``carry_bp``, swap rates -- anything a strategy or the
+        research protocol reads beside the mid price -- goes into the
+        ``bar_features`` side table and comes back joined by ``frame()``. The
+        carry family's whole input used to be dropped at this boundary.
+        """
+        from .validation import validate_frame
+        validate_frame(frame, name=f"{instrument}@{timeframe}")
+        n = self.upsert(bars_from_frame(frame, instrument, timeframe, source))
+        extras = [c for c in frame.columns
+                  if c not in ("open", "high", "low", "close", "volume", "source", "quality")]
+        if extras:
+            starts = frame.index.tz_convert("UTC").as_unit("ns").asi8
+            rows = []
+            for i, start in enumerate(starts):
+                payload = {}
+                for c in extras:
+                    v = frame[c].iloc[i]
+                    if hasattr(v, "item"):
+                        v = v.item()
+                    if isinstance(v, float) and not np.isfinite(v):
+                        continue
+                    payload[c] = v
+                rows.append((instrument, timeframe, int(start),
+                             json.dumps(payload, allow_nan=False, default=str)))
+            with self._lock:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO bar_features VALUES (?,?,?,?)", rows)
+                self._conn.commit()
+        return n
+
     def frame(self, instrument: str, timeframe: str, limit: int = 5000,
               complete_only: bool = True) -> pd.DataFrame:
         q = ("SELECT start_ns, end_ns, open, high, low, close, volume, source, quality, complete "
@@ -133,6 +176,17 @@ class BarStore:
         idx = pd.to_datetime(df["start_ns"], unit="ns", utc=True)
         out = df[["open", "high", "low", "close", "volume", "source", "quality"]].copy()
         out.index = pd.DatetimeIndex(idx)
+        with self._lock:
+            extra = self._conn.execute(
+                "SELECT start_ns, payload FROM bar_features WHERE instrument=? AND "
+                "timeframe=? AND start_ns>=? AND start_ns<=?",
+                (instrument, timeframe, int(df["start_ns"].iloc[0]),
+                 int(df["start_ns"].iloc[-1]))).fetchall()
+        if extra:
+            feats = pd.DataFrame([json.loads(r["payload"]) for r in extra],
+                                 index=pd.to_datetime([int(r["start_ns"]) for r in extra],
+                                                      unit="ns", utc=True))
+            out = out.join(feats, how="left")
         return out
 
     def passport(self, instrument: str, timeframe: str,
@@ -190,15 +244,32 @@ class BarStore:
             return 0
         starts = np.array(sorted(int(r["start_ns"]) for r in rows))
         interval_ns = TIMEFRAME_SECONDS.get(timeframe, 3600) * 1_000_000_000
-        diffs = np.diff(starts)
-        # A weekend is ~2.5 days; anything longer than that is not a gap we can
-        # attribute to the market being shut.
-        weekend_ns = int(2.6 * 86400 * 1e9)
-        return int(((diffs > interval_ns * 1.5) & (diffs < weekend_ns)).sum())
+        # A gap is a missing bar during MARKET HOURS. The FX week is shut from
+        # Friday 22:00 UTC to Sunday 22:00 UTC (within an hour across DST), so
+        # a hole that lies entirely inside that window is the weekend, not a
+        # gap -- and a hole that spans Thursday is a gap however long it is.
+        # The old "anything shorter than 2.6 days" heuristic counted every
+        # weekend on M15 and missed a day-long outage on D1.
+        gaps = 0
+        for a, b in zip(starts[:-1], starts[1:]):
+            if b - a <= interval_ns * 1.5:
+                continue
+            missing = pd.date_range(pd.Timestamp(int(a + interval_ns), unit="ns", tz="UTC"),
+                                    pd.Timestamp(int(b - 1), unit="ns", tz="UTC"),
+                                    freq=pd.Timedelta(interval_ns, unit="ns"))
+            if any(not _fx_closed(t) for t in missing):
+                gaps += 1
+        return gaps
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _fx_closed(t: pd.Timestamp) -> bool:
+    """Inside the weekend close (Fri 22:00 UTC .. Sun 22:00 UTC)."""
+    wd, h = t.weekday(), t.hour
+    return wd == 5 or (wd == 4 and h >= 22) or (wd == 6 and h < 22)
 
 
 def frame_from_bars(bars: Sequence[Bar]) -> pd.DataFrame:
@@ -391,6 +462,11 @@ class MarketFeed:
         fresh = [b for b in bars if b.complete and b.end_ns <= now_ns]
         if not fresh:
             return 0
+        # Bar.__post_init__ already refuses impossible geometry per bar; the
+        # frame-level check adds ordering and duplicates, which a venue that
+        # re-sends a corrected bar can produce.
+        from .validation import validate_frame
+        validate_frame(frame_from_bars(fresh), name=f"{sym}@{timeframe}")
         self.store.upsert(fresh)
         # Report NEW bars, not rows touched: the overlap re-confirms the head
         # and must not read as ingestion on every cycle.
@@ -419,7 +495,16 @@ class MarketFeed:
             try:
                 q = self.broker.quote(sym)
                 snap.quotes[sym] = q
-                snap.ages[sym] = (now - q.received_ns) / 1e9
+                # The older of two ages: when we received it, and when the
+                # VENUE stamped it. A price the venue stamped ten minutes ago
+                # and we received just now is ten minutes old, and measuring
+                # only receipt let a frozen feed read as fresh forever.
+                venue_age = (now - q.ts_ns) / 1e9 if q.ts_ns else 0.0
+                if q.ts_ns and q.ts_ns > now + 2_000_000_000:
+                    # A quote from the future is a clock problem somewhere;
+                    # trading on it is trading on a number nobody can place.
+                    snap.quality[sym] = DataQuality.SUSPECT
+                snap.ages[sym] = max((now - q.received_ns) / 1e9, venue_age)
             except Exception as exc:  # noqa: BLE001 - a failed quote is data, not a crash
                 snap.errors[sym] = f"quote: {exc}"
                 snap.quality[sym] = DataQuality.GAP

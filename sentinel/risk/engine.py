@@ -111,6 +111,12 @@ class RiskContext:
     strategy_lifecycles: Dict[str, str] = field(default_factory=dict)
     live_money: bool = False
     projected_trades_per_year: Optional[int] = None
+    #: The rest of the owner's engines, from risk/portfolio.GroupLedger. None
+    #: when this engine is not in a group.
+    group_others_open_risk: Optional[Decimal] = None
+    group_others_equity: Decimal = ZERO
+    group_others_currency_risk: Dict[str, Decimal] = field(default_factory=dict)
+    group_unknown_members: List[str] = field(default_factory=list)
 
     def conversion(self, quote_ccy: str) -> Optional[Decimal]:
         """Quote -> account rate, or None when it is unknown.
@@ -656,6 +662,40 @@ class RiskEngine:
                 f"{len(ctx.positions)} open position(s) plus orders in flight",
                 observed=f"{total_risk_pct:.2f}%",
                 limit=f"{cfg.max_total_open_risk_pct}%"))
+
+        # ---- 11b. the owner's other accounts ----------------------------- #
+        # Each engine bounds its own book; this bounds the group. The total
+        # is this engine's committed risk plus every fresh member's, over the
+        # group's equity. A member whose row is stale or unreadable is
+        # UNKNOWN risk, and unknown risk blocks -- an engine that cannot see
+        # its sibling cannot claim to have bounded the owner.
+        if ctx.group_others_open_risk is not None:
+            if ctx.group_unknown_members:
+                vetoes.append(Veto(
+                    "group_visibility",
+                    "cannot see the risk of " + ", ".join(ctx.group_unknown_members)
+                    + " (ledger row stale or unreadable); the group total is unknown",
+                    observed=", ".join(ctx.group_unknown_members), limit="all visible"))
+            group_equity = base_eq + ctx.group_others_equity
+            group_risk = total_risk + ctx.group_others_open_risk
+            group_pct = group_risk / group_equity * D("100") if group_equity > 0 else ZERO
+            diag["group_total_risk_pct"] = f"{group_pct:.3f}"
+            if group_pct > cfg.max_group_open_risk_pct:
+                vetoes.append(Veto(
+                    "group_total_risk",
+                    f"committed risk across the owner's accounts would reach "
+                    f"{group_pct:.2f}% of {group_equity:.0f} group equity",
+                    observed=f"{group_pct:.2f}%", limit=f"{cfg.max_group_open_risk_pct}%"))
+            for ccy, e in exposures.items():
+                combined = e.net_risk + ctx.group_others_currency_risk.get(ccy, ZERO)
+                pct = abs(combined) / group_equity * D("100") if group_equity > 0 else ZERO
+                if pct > cfg.max_group_currency_exposure_pct:
+                    vetoes.append(Veto(
+                        "group_currency_exposure",
+                        f"net {ccy} risk across the owner's accounts would be {pct:.2f}% "
+                        "of group equity -- the same bet in two books",
+                        observed=f"{pct:.2f}%",
+                        limit=f"{cfg.max_group_currency_exposure_pct}%"))
 
         # ---- 12. every open position must already be protected ---------- #
         # The `no_stop` check above covers this intent. This covers the book:

@@ -52,7 +52,8 @@ class ExecutionVenueMode(str, Enum):
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True, frozen=False)
+    model_config = ConfigDict(extra="forbid", validate_assignment=True, frozen=False,
+                              allow_inf_nan=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +105,24 @@ class RiskConfig(StrictModel):
         description="Total risk across open positions AND orders still in flight. "
                     "Without this, pending orders are invisible to every portfolio "
                     "limit and a burst of entries can commit far more than intended.",
+    )
+    # --- across accounts ---------------------------------------------------- #
+    max_group_open_risk_pct: Decimal = Field(
+        Decimal("3.00"), gt=0,
+        description="Total committed risk across every engine sharing "
+                    "ops.group_ledger_dir, as a percent of the GROUP's equity. Two "
+                    "accounts each at 2% are 4% of the owner's capital; this is the "
+                    "number that bounds the owner, not the account.",
+    )
+    max_group_currency_exposure_pct: Decimal = Field(
+        Decimal("2.00"), gt=0,
+        description="Net risk on one currency leg across the group, percent of group equity.",
+    )
+    group_ledger_stale_sec: int = Field(
+        300, ge=30, le=3600,
+        description="A member row older than this is treated as unknown, and an "
+                    "unknown member blocks new entries: risk you cannot see is not "
+                    "risk you have bounded.",
     )
     correlation_threshold: float = Field(0.65, ge=0.0, le=1.0)
     correlation_lookback_bars: int = Field(240, ge=30, le=5000)
@@ -343,6 +362,18 @@ class ExecutionConfig(StrictModel):
                     "reconciled against the live terminal at startup.",
     )
     account_currency: str = Field("USD", min_length=3, max_length=5)
+    # The account this configuration is FOR. When set, the broker is wrapped in
+    # AccountBoundBroker and every call re-checks that the venue still reports
+    # this account, type and currency -- so a terminal someone signed into a
+    # different account cannot silently receive this configuration's orders.
+    # Empty means "unbound", which is acceptable for the paper venue only.
+    expected_account_id: str = Field("", max_length=64)
+    expected_account_server: str = Field("", max_length=120)
+    # The venue's cost schedule as the OPERATOR verified it. The runtime cost
+    # model, the break-even stop and the research replay all read these, so the
+    # commission the strategy was accepted on is the commission it is charged.
+    commission_per_lot_round_turn: Decimal = Field(Decimal("7"), ge=0)
+    expected_slippage_pips: Decimal = Field(Decimal("0.15"), ge=0)
     order_type: Literal["market", "limit", "stop"] = "market"
     limit_offset_pips: Decimal = Field(Decimal("0.3"), ge=0)
     max_slippage_pips: Decimal = Field(Decimal("1.5"), ge=0)
@@ -449,7 +480,12 @@ class ResearchConfig(StrictModel):
 
 class OpsConfig(StrictModel):
     heartbeat_interval_sec: int = Field(5, ge=1, le=120)
-    deadman_timeout_sec: int = Field(45, ge=5, le=3600)
+    # MUST exceed the decision interval by a margin: the heartbeat's liveness
+    # stamp advances only when a cycle completes (ops/killswitch.Heartbeat), so
+    # a 45 s dead-man against a 60 s cycle engaged the kill switch on every
+    # healthy loop. The cross-check in SentinelConfig enforces the margin, and
+    # it is the ONE rule the API, the runner and the watchdog all read.
+    deadman_timeout_sec: int = Field(180, ge=5, le=3600)
     deadman_action: Literal["alert", "flatten", "close_only"] = "close_only"
     killswitch_file: str = "var/KILL"
     state_dir: str = "var"
@@ -466,6 +502,12 @@ class OpsConfig(StrictModel):
     metrics_retention_days: int = Field(365, ge=7, le=3650)
     backup_dir: Optional[str] = None
     ntp_check_interval_sec: int = Field(300, ge=30, le=86400)
+    group_ledger_dir: Optional[str] = Field(
+        None,
+        description="Shared directory of the cross-account risk ledger "
+                    "(risk/portfolio.py). Every engine of one owner should point "
+                    "here; None means this engine is alone.",
+    )
 
 
 class SecurityConfig(StrictModel):
@@ -526,6 +568,18 @@ class AgentConfig(StrictModel):
     )
     regime_detection_enabled: bool = True
     explain_every_decision: bool = True
+    # The performance guard: after this many closed trades of one strategy, if
+    # the upper 95% confidence bound of its mean R is still below zero, the
+    # strategy is SUSPENDED for new entries and the operator is told. A
+    # strategy that is demonstrably losing does not get to keep proving it with
+    # the account's money; nothing here re-enables it -- a human does.
+    performance_guard_enabled: bool = True
+    performance_guard_min_trades: int = Field(50, ge=30, le=1000)
+    # A fitted meta-label filter (research/metalabel.MetaGate, saved by
+    # scripts/run_acceptance.py --meta-label --save-meta). Consulted before
+    # the risk engine on every primary signal. Its file hash is part of the
+    # acceptance fingerprint: a different model is a different system.
+    meta_model_path: Optional[str] = None
 
     @field_validator("session_windows_utc")
     @classmethod
@@ -541,6 +595,16 @@ class AgentConfig(StrictModel):
         if any(d < 0 or d > 6 for d in v):
             raise ValueError("trade_days entries must be 0..6")
         return sorted(set(v))
+
+
+#: The dead-man timeout must exceed the decision interval by at least this
+#: much: one venue round trip, one reconcile, and clock jitter. One constant,
+#: read by the config validator, the account runner and the API.
+DEADMAN_MARGIN_SEC = 60
+
+
+def deadman_timeout_ok(deadman_timeout_sec: int, decision_interval_sec: int) -> bool:
+    return int(deadman_timeout_sec) > int(decision_interval_sec) + DEADMAN_MARGIN_SEC
 
 
 class SentinelConfig(StrictModel):
@@ -579,6 +643,19 @@ class SentinelConfig(StrictModel):
         names = [s.name for s in self.strategies]
         if len(names) != len(set(names)):
             raise ValueError("duplicate strategy names")
+        if not deadman_timeout_ok(self.ops.deadman_timeout_sec,
+                                  self.agent.decision_interval_sec):
+            raise ValueError(
+                f"ops.deadman_timeout_sec ({self.ops.deadman_timeout_sec}) must exceed "
+                f"agent.decision_interval_sec ({self.agent.decision_interval_sec}) by more "
+                f"than {DEADMAN_MARGIN_SEC}s: the heartbeat advances once per cycle, so a "
+                "tighter dead-man trips on a healthy loop")
+        # An external venue without a declared account is a configuration that
+        # trades whichever account the terminal happens to be signed into.
+        if (self.execution.broker != "paper"
+                and self.execution.venue_mode is ExecutionVenueMode.LIVE
+                and not self.execution.expected_account_id):
+            raise ValueError("live trading requires execution.expected_account_id")
         return self
 
     # -- persistence -------------------------------------------------------- #

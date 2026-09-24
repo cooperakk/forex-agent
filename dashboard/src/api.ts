@@ -101,12 +101,15 @@ export function makeLiveProvider(base: string, token: string): Provider {
     },
     connectStream(onMessage) {
       let closed = false;
-      const url = `${base.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(token)}`;
+      // The token rides in the WebSocket subprotocol list, never the URL: a
+      // query string is written to access logs and proxies, and a session
+      // token in a log is a session for whoever reads it.
+      const url = `${base.replace(/^http/, "ws")}/ws`;
       let ws: WebSocket | null = null;
       let retry = 0;
       const open = () => {
         if (closed) return;
-        try { ws = new WebSocket(url); } catch { return; }
+        try { ws = new WebSocket(url, ["sentinel-v1", `auth.${token}`]); } catch { return; }
         ws.onmessage = (ev) => { try { onMessage(JSON.parse(ev.data)); } catch { /* ignore */ } };
         ws.onclose = () => {
           if (closed) return;

@@ -42,6 +42,7 @@ from ..risk.engine import RiskContext, RiskEngine
 from ..risk.protect import ProtectAction, evaluate_protection, time_stop, weekend_flat
 from ..strategy.base import Strategy, atr
 from .metrics import PerformanceReport, compute_performance
+from .metalabel import bar_context_features, signal_features
 from .trials import record_trial, window_key
 
 _TIMEFRAME_SECONDS = {
@@ -163,6 +164,19 @@ class BacktestConfig:
     #: Bars ahead over which a signal's forward return is measured, for the
     #: directional-accuracy gate. Capped by the strategy's own horizon.
     forward_return_bars: int = 8
+    #: "rules"  -- this module's harness: the agent's rules, re-implemented.
+    #:            Fast, exploratory, and NOT a shared runtime (gate L11 fails).
+    #: "agent"  -- research.replay: the production Agent/OMS/risk loop itself,
+    #:            driven by execution bars at the production cadence.
+    engine: str = "rules"
+    #: For engine="agent": the runtime configuration, finer execution bars and
+    #: an optional historical calendar source. See research.replay.
+    runtime_config: object = None
+    execution_data: object = None
+    news_source: object = None
+    #: A fitted research.metalabel.MetaGate consulted before every entry, in
+    #: both engines. None -> every primary signal passes.
+    meta_gate: object = None
 
 
 @dataclass
@@ -238,6 +252,21 @@ def run_backtest(
     size_scaler: Optional[Callable[[Signal], float]] = None,
 ) -> BacktestResult:
     cfg = config or BacktestConfig()
+    if cfg.engine == "agent":
+        from .replay import ReplayConfig, run_agent_replay
+        rc = ReplayConfig(
+            starting_equity=cfg.starting_equity, account_currency=cfg.account_currency,
+            cost_multiplier=cfg.cost_multiplier, latency_multiplier=cfg.latency_multiplier,
+            seed=cfg.seed, warmup_bars=cfg.warmup_bars, label=cfg.label,
+            data_label=cfg.data_label, trial_kind=cfg.trial_kind,
+            record_trial=cfg.record_trial, periods_per_year=cfg.periods_per_year,
+            runtime_config=cfg.runtime_config, execution_data=cfg.execution_data,
+            news_source=cfg.news_source, forward_return_bars=cfg.forward_return_bars,
+            meta_gate=cfg.meta_gate)
+        return run_agent_replay(strategy, data, instruments, risk_config, rc,
+                                sim_profile=sim_profile, conversions=conversions)
+    if cfg.engine != "rules":
+        raise ValueError(f"unknown backtest engine {cfg.engine!r}; use 'rules' or 'agent'")
     profile = sim_profile or SimProfile()
     if cfg.cost_multiplier != 1.0 or cfg.latency_multiplier != 1.0:
         profile = profile.stressed(cfg.cost_multiplier, cfg.latency_multiplier)
@@ -254,6 +283,8 @@ def run_backtest(
     # between prices that never coexisted. The union of the timestamps is the
     # clock; a symbol with no bar at a given instant simply has no bar there --
     # it is not replayed, not signalled, and its indicators see the gap.
+    from ..data.validation import validate_universe
+    validate_universe({s: data[s] for s in symbols})
     data, index, missing_bars = _align_on_timestamps(data, symbols, warmup)
     length = len(index)
     if cfg.max_bars:
@@ -519,10 +550,17 @@ def run_backtest(
                     "fwd_ret_h": (float(fh / c0 - 1.0)
                                   if np.isfinite(fh) and c0 > 0 else None),
                     "horizon_bars": h,
+                    "features": signal_features(sig, bar_context_features(view[sym], i)),
                 })
                 if signal_filter is not None and not signal_filter(sig):
                     veto_counts["meta_filter"] = veto_counts.get("meta_filter", 0) + 1
                     continue
+                if cfg.meta_gate is not None:
+                    act, p, _ = cfg.meta_gate.decide(
+                        sig, bar_context_features(view[sym], i))
+                    if not act:
+                        veto_counts["meta_label"] = veto_counts.get("meta_label", 0) + 1
+                        continue
                 pending.append(sig)
 
     # Flatten anything still open, at the last available price, and OVERWRITE the
@@ -590,7 +628,7 @@ def run_backtest(
                      "max_open_positions": risk_config.max_open_positions,
                      "max_trades_per_day": risk_config.max_trades_per_day},
         },
-        diagnostics={"instruments": symbols,
+        diagnostics={"engine": "rules-harness", "instruments": symbols,
                      "first_bar": str(index[0]), "last_bar": str(index[length - 1]),
                      "missing_bars": missing_bars,
                      "generation_errors": generation_errors[:20],

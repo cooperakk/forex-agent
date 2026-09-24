@@ -58,6 +58,14 @@ def main() -> int:
                     help="permit a non-loopback bind (only behind a VPN)")
     ap.add_argument("--terminal", default=None,
                     help="path to terminal64.exe; omit to attach to the running terminal")
+    ap.add_argument("--max-lots", type=float, default=0.5,
+                    help="largest new position the bridge will pass to the terminal")
+    ap.add_argument("--allow-live", action="store_true",
+                    help="permit new positions on a LIVE account (default: demo only)")
+    ap.add_argument("--symbols", default=None,
+                    help="comma-separated VENUE symbols the bridge may open; omit for any")
+    ap.add_argument("--journal", default="bridge-writes.json",
+                    help="durable write journal beside the token file")
     args = ap.parse_args()
 
     try:
@@ -85,8 +93,17 @@ def main() -> int:
     mt5.shutdown()
 
     token = _token(Path(args.token_file))
+    from sentinel.brokers.mt5_bridge import BridgeEnvelope
+    envelope = BridgeEnvelope(
+        account_id=str(info.login), server=str(getattr(info, "server", "") or ""),
+        max_lots=args.max_lots, allow_live=args.allow_live,
+        symbols={s.strip() for s in args.symbols.split(",")} if args.symbols else None,
+        journal_path=str(Path(args.token_file).with_name(args.journal)))
+    print(f"[bridge] bound to account {info.login}; new positions capped at "
+          f"{args.max_lots} lots; live {'ALLOWED' if args.allow_live else 'refused'}")
     server = BridgeServer(mt5, token=token, host=args.bind, port=args.port,
-                          allow_remote=args.allow_remote, log=lambda s: print(f"[bridge] {s}"))
+                          allow_remote=args.allow_remote, log=lambda s: print(f"[bridge] {s}"),
+                          envelope=envelope)
     server.start()
     print("[bridge] serving. Leave this window open; Ctrl+C stops it.")
     server.serve_forever()

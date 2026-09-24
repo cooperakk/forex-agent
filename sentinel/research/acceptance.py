@@ -77,7 +77,15 @@ REQUIRED_GATES = {
     "L7": ("cost / latency stress", "the stressed backtest"),
     "L8": ("drawdown ceiling", "the candidate and the CPCV paths"),
     "L9": ("statistical power", "the candidate returns"),
+    "L10": ("verified data and costs", "a dataset manifest verified by content"),
+    "L11": ("shared runtime", "an agent-replay candidate at production cadence"),
+    "L12": ("forward validation", "a verified forward record under this fingerprint"),
+    "L13": ("generation integrity", "the candidate's diagnostics"),
 }
+#: Closed forward trades before L12 can pass. A floor, not a statistical
+#: guarantee: fifty trades distinguish a disaster from a candidate, not a
+#: candidate from luck.
+FORWARD_MIN_TRADES = 50
 
 
 @dataclass
@@ -229,6 +237,9 @@ def evaluate(
     timeframe: str = "",
     cpcv_report=None,
     venue_profile: str = "",
+    provenance: Optional[Dict[str, Any]] = None,
+    forward: Optional[Dict[str, Any]] = None,
+    runtime_config=None,
     store=None,
 ) -> Verdict:
     rc = research_config or ResearchConfig()
@@ -352,7 +363,23 @@ def evaluate(
     effective_trials = effective_trial_count(
         declared_trials, ledger_trials, observed_variants, floor=2)
 
-    dsr = deflated_sharpe_ratio(returns, effective_trials,
+    # The dispersion of Sharpe across the variants actually tried is the
+    # honest input to E[max SR]; the asymptotic fallback is used only when no
+    # family was evaluated.
+    trial_sharpes = None
+    if variant_returns is not None and np.asarray(variant_returns).ndim == 2 \
+            and np.asarray(variant_returns).shape[1] >= 3:
+        candidates = [sharpe_ratio(col, periods_per_year)
+                      for col in np.asarray(variant_returns, dtype=float).T]
+        # A family whose members are (near-)identical -- a filter that blocked
+        # almost everything, a parameter that changes nothing -- has no
+        # dispersion to measure, and E[max] over zero variance is zero: a bar
+        # of 0.00 that any positive Sharpe clears. Fall back to the asymptotic
+        # variance rather than certify against nothing.
+        if len({round(c, 6) for c in candidates}) >= 3 and \
+                float(np.var(candidates, ddof=1)) > 1e-9:
+            trial_sharpes = candidates
+    dsr = deflated_sharpe_ratio(returns, effective_trials, trial_sharpes=trial_sharpes,
                                 periods_per_year=periods_per_year)
     parts = [f"{effective_trials} trials"]
     if trial_summary is not None:
@@ -446,6 +473,94 @@ def evaluate(
             "distinguishable from zero at the declared confidence."))
         evidence["min_track_record_length"] = round(mintrl, 1)
 
+    posterior = posterior_given_significant(rc.declared_prior, rc.alpha, 0.5)
+    accepted = all(g.passed for g in gates if g.blocking)
+    # ---- L10: data and costs, verified by CONTENT ------------------------- #
+    # A label is not provenance. What passes is a manifest whose file hashes
+    # matched, whose files carry the venue's own bid/ask OHLC, and whose cost
+    # schedule is complete -- research/evidence.verify_dataset produces it.
+    prov = provenance or {}
+    quality_ok = bool(data_label == "live-quality" and prov.get("verified") is True
+                      and prov.get("bid_ask") is True and prov.get("sha256")
+                      and prov.get("cost_schedule") and prov.get("broker"))
+    gates = [g for g in gates if g.id != "L10"]
+    gates.append(Gate(
+        "L10", "verified data and costs", quality_ok,
+        (f"{data_label}, verified against {len(prov.get('sha256') or {})} file hashes, "
+         f"broker {prov.get('broker')}" if quality_ok else
+         f"{data_label}" + ("" if data_label == "live-quality" else " (cannot promote)")),
+        "live-quality: venue bid/ask OHLC + file hashes + complete cost schedule",
+        "Acceptance requires the venue's own historical bid/ask and the real cost "
+        "schedule, checked by content. Synthetic or third-party mid prices can "
+        "falsify a strategy but can never accept one; a typed label proves nothing."))
+    if not quality_ok:
+        accepted = False
+    evidence["provenance"] = prov
+
+    # ---- L11: the thing validated is the thing that runs ------------------ #
+    diag = candidate.diagnostics or {}
+    parity = bool(diag.get("engine", "").startswith("agent-replay")
+                  and int(diag.get("execution_cadence_sec", 10**9))
+                  <= int(diag.get("decision_interval_sec", 60))
+                  and diag.get("runtime_context_complete") is True)
+    gates.append(Gate(
+        "L11", "shared runtime", parity,
+        (f"{diag.get('engine', 'unknown')}, cadence {diag.get('execution_cadence_sec', '?')}s, "
+         f"news {'replayed' if diag.get('news_replayed') else 'off'}"),
+        "agent-replay at production cadence, news context complete",
+        "The production Agent/OMS/risk loop itself, driven by execution bars no "
+        "coarser than its decision interval, with the news calendar replayed at "
+        "the simulated clock (or disabled in the runtime). A rules harness "
+        "re-implements the agent and validates a program that never runs."))
+    if not parity:
+        accepted = False
+
+    # ---- L12: it worked on the account it is for --------------------------- #
+    fwd = forward or {}
+    from .verdicts import config_fingerprint as _fp
+    expected_hash = _fp(
+        instruments if instruments is not None else candidate.diagnostics.get("instruments", []),
+        params if params is not None
+        else (candidate.config_snapshot.get("strategy") or {}).get("params", {}),
+        timeframe or (candidate.config_snapshot.get("strategy") or {}).get("timeframe", ""),
+        runtime_config=runtime_config)
+    forward_ok = bool(fwd.get("verified") is True
+                      and int(fwd.get("n_trades", 0)) >= FORWARD_MIN_TRADES
+                      and float(fwd.get("net_pnl", 0)) > 0
+                      and fwd.get("runtime_hash") == expected_hash
+                      and float(fwd.get("max_drawdown_pct", 101)) <= max_drawdown_ceiling_pct)
+    gates.append(Gate(
+        "L12", "forward validation", forward_ok,
+        (f"{fwd.get('n_trades')} closed trades, net {float(fwd.get('net_pnl', 0)):+.2f}, "
+         f"max DD {float(fwd.get('max_drawdown_pct', 0)):.2f}%, fingerprint "
+         f"{'matches' if fwd.get('runtime_hash') == expected_hash else 'MISMATCH'}"
+         if fwd.get("verified") else "no verified forward record"),
+        f">= {FORWARD_MIN_TRADES} closed trades under THIS fingerprint, positive net "
+        f"P&L, drawdown <= {max_drawdown_ceiling_pct:.1f}%",
+        "A demo or live run of this exact configuration, reconciled to the cent "
+        "against the account, with floating-equity drawdown. It is the only gate "
+        "that touches a real venue's fills, spreads and rejections."))
+    if not forward_ok:
+        accepted = False
+    evidence["forward"] = fwd
+
+    # ---- L13: the run was clean ------------------------------------------- #
+    clean = (not diag.get("generation_errors")
+             and int(diag.get("generation_error_count", 0)) == 0
+             and not diag.get("halted")
+             and int(candidate.performance.n_trades) >= 30)
+    gates.append(Gate(
+        "L13", "generation integrity", bool(clean),
+        (f"{candidate.performance.n_trades} trades, "
+         f"{int(diag.get('generation_error_count', 0))} generation errors"
+         + (", HALTED: " + str(diag.get("halt_reason", ""))[:60] if diag.get("halted") else "")),
+        ">= 30 trades, no strategy errors, no halt",
+        "A candidate whose strategy raised exceptions on some bars, or that "
+        "halted mid-run, produced statistics about a different run than the one "
+        "that would trade."))
+    if not clean:
+        accepted = False
+
     # ---- the fixed list: anything not evaluated is a failure ---------------- #
     present = {g.id for g in gates}
     required = dict(REQUIRED_GATES)
@@ -465,15 +580,7 @@ def evaluate(
     evidence["gates_not_evaluated"] = sorted(
         g for g in required if g not in present)
 
-    posterior = posterior_given_significant(rc.declared_prior, rc.alpha, 0.5)
     accepted = all(g.passed for g in gates if g.blocking)
-    if data_label != "live-quality":
-        accepted = False
-        gates.append(Gate(
-            "L10", "data provenance", False, data_label, "live-quality broker data",
-            "Acceptance requires the venue's own historical bid/ask and the real "
-            "commission schedule. Synthetic or third-party mid prices can falsify a "
-            "strategy but can never accept one.", blocking=True))
 
     failed = [g.id for g in gates if g.blocking and not g.passed]
     summary = ("accepted: every declared gate passed" if accepted

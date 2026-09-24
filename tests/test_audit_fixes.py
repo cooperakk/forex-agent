@@ -506,7 +506,8 @@ class TestPromotionRequiresAStoredVerdict:
         runtime.verdicts.record(
             Verdict(run_id="RUN-5", strategy="donchian_trend", created_at_ns=1,
                     accepted=True, data_label="live-quality", summary="ok"),
-            config_hash=config_fingerprint(["EUR_USD"], {"channel": 55}, "H4"))
+            config_hash=config_fingerprint(["EUR_USD"], {"channel": 55}, "H4",
+                                           runtime_config=runtime.agent.config))
         runtime.update_config({"strategies": [alloc]}, "owner")
         swapped = {**alloc, "instruments": ["USD_JPY", "GBP_USD", "AUD_USD"],
                    "params": {"channel": 5}}
@@ -523,11 +524,19 @@ class TestPromotionRequiresAStoredVerdict:
         runtime.verdicts.record(
             Verdict(run_id="RUN-6", strategy="donchian_trend", created_at_ns=1,
                     accepted=True, data_label="live-quality", summary="ok"),
-            config_hash=config_fingerprint(["EUR_USD"], {"channel": 55}, "H4"))
+            config_hash=config_fingerprint(["EUR_USD"], {"channel": 55}, "H4",
+                                           runtime_config=runtime.agent.config))
         runtime.update_config({"strategies": [alloc]}, "owner")
-        # An unrelated edit must not require a fresh acceptance run.
-        runtime.update_config({"risk": {"min_stop_pips": "12"}}, "owner")
+        # An edit OUTSIDE the runtime policy (a dashboard session setting) does
+        # not touch the fingerprint and needs no fresh run.
+        runtime.update_config({"ops": {"log_level": "DEBUG"}}, "owner")
         assert runtime.agent.config.strategies[0].lifecycle == "accepted"
+        # An edit INSIDE it -- a stop floor changes which trades happen -- is
+        # refused with a message that names the remedy, rather than letting an
+        # accepted badge describe a system that was never validated.
+        with pytest.raises(ValueError, match="runtime policy"):
+            runtime.update_config({"risk": {"min_stop_pips": "12"}}, "owner")
+        assert runtime.agent.config.risk.min_stop_pips == D("10")
 
     @pytest.mark.parametrize("patch,needle", [
         ({"agent": {"mode": "autonomous"}}, "agent.mode"),
@@ -734,6 +743,7 @@ class TestConfigFileIsNotAnEscalationSurface:
         raw = json.loads(SentinelConfig().to_json())
         raw["execution"]["venue_mode"] = "live"
         raw["execution"]["broker"] = "oanda"
+        raw["execution"]["expected_account_id"] = "001-001-1234567-001"
         raw["agent"]["mode"] = "autonomous"
         raw["strategies"] = [{
             "name": "donchian_trend", "enabled": True, "weight": "1.0",
@@ -756,7 +766,10 @@ class TestConfigFileIsNotAnEscalationSurface:
         checked, violations, repaired = enforce_config_authority(cfg, store)
         assert checked.strategies[0].lifecycle == "suspended"
         assert checked.strategies[0].enabled is False
-        assert checked.execution.venue_mode.value == "paper"
+        # The venue stays LIVE and the mode drops to observe: forcing paper
+        # would disconnect from an account that may be holding positions.
+        assert checked.execution.venue_mode.value == "live"
+        assert checked.agent.mode.value == "observe"
         assert len(violations) == 2
         # A repair is a mutation and takes a new version, or one version number
         # would denote two different configurations.
@@ -786,10 +799,10 @@ class TestConfigFileIsNotAnEscalationSurface:
             VerdictStore, config_fingerprint, enforce_config_authority,
         )
         store = VerdictStore(tmp_path / "v.db")
+        cfg = self._raw_config(tmp_path, run_id="R-OK")
         store.record(Verdict(run_id="R-OK", strategy="donchian_trend", created_at_ns=1,
                              accepted=True, data_label="live-quality", summary="ok"),
-                     config_hash=config_fingerprint(["EUR_USD"], {}, "H4"))
-        cfg = self._raw_config(tmp_path, run_id="R-OK")
+                     config_hash=config_fingerprint(["EUR_USD"], {}, "H4", runtime_config=cfg))
         checked, violations, repaired = enforce_config_authority(cfg, store)
         assert violations == [] and repaired is False
         assert checked.strategies[0].lifecycle == "accepted"

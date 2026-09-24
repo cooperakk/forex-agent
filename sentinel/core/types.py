@@ -173,6 +173,13 @@ class OrderIntent:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Coerce every monetary field through dec(): a float that arrives from a
+        # strategy or a JSON body must not carry binary noise into the venue.
+        for name in ("lots", "limit_price", "stop_loss", "take_profit",
+                     "risk_amount", "risk_pct", "expected_cost_pips"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, Decimal):
+                setattr(self, name, D(repr(value)) if isinstance(value, float) else D(str(value)))
         if self.lots <= 0:
             raise ValueError("order lots must be positive")
         if self.order_type is OrderType.MARKET and self.limit_price is not None:

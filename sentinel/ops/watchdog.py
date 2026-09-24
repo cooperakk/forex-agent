@@ -135,7 +135,7 @@ def _config_deadman_defaults() -> tuple:
         cfg = SentinelConfig.load(os.environ.get("SENTINEL_CONFIG", "var/config.json"))
         return float(cfg.ops.deadman_timeout_sec), str(cfg.ops.deadman_action)
     except Exception:  # noqa: BLE001
-        return 45.0, "close_only"
+        return 180.0, "close_only"
 
 
 def main() -> int:
@@ -167,9 +167,17 @@ def main() -> int:
     print(f"[watchdog] pid={os.getpid()} watching {hb} "
           f"timeout={args.timeout}s action={args.action}", flush=True)
 
+    # One grace period, measured from the watchdog's OWN start on the monotonic
+    # clock, so an engine that is still initialising (journal replay, symbol
+    # table, first reconcile) is not killed before its first cycle. It is not
+    # refreshed per poll: a stale heartbeat after the grace period is a trip.
+    started = time.monotonic()
     while True:
         age = heartbeat_age(hb)
         stale = age is None or age > args.timeout
+        if stale and not getattr(args, "once", False) and time.monotonic() - started < args.timeout:
+            time.sleep(args.poll)
+            continue
         # STATE-based, not edge-based. Latching on the transition meant that if
         # an owner released the kill switch while the engine was still wedged
         # -- believing it had recovered -- the watchdog never re-engaged it for

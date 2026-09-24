@@ -144,8 +144,7 @@ class TestAdapterOverTheBridge:
         b, fake, *_ = broker
         a = b.account()
         assert a.account_id == "1000001" and a.currency == "USD"
-        # The fake reports no trade_mode, so the type is unknown -- the same
-        # answer the adapter gives with the package in-process.
+        assert a.account_type == "demo"
         direct = MT5Broker(profile=get_profile("generic_mt5"), mt5_module=fake)
         assert a.account_type == direct.account().account_type
         assert b.positions() == []
@@ -229,3 +228,113 @@ class TestWiring:
                                   side=Side.BUY, lots=D("0.01"), stop_loss=D("1.0")),
                       timeout_ms=100)
         assert fake.sent_requests == []
+
+
+class TestEnvelope:
+    """The second lock, enforced beside the terminal."""
+
+    def _server(self, fake, **env):
+        from sentinel.brokers.mt5_bridge import BridgeEnvelope
+        server = BridgeServer(fake, token=TOKEN, host="127.0.0.1", port=0,
+                              envelope=BridgeEnvelope(**env))
+        host, port = server.start()
+        client = BridgeMT5(host, port, token=TOKEN)
+        return server, MT5Broker(profile=get_profile("generic_mt5"), mt5_module=client)
+
+    def _intent(self, lots="0.10", sl=D("1.09000"), coid="SFXenv0001"):
+        return OrderIntent(client_order_id=coid, strategy="t", instrument="EUR_USD",
+                           side=Side.BUY, lots=D(lots), stop_loss=sl)
+
+    def test_a_changed_terminal_account_refuses_everything(self):
+        fake = FakeMT5()
+        server, b = self._server(fake)
+        assert b.quote("EUR_USD").ask > 0
+        fake.account.login = 2000002          # someone signed into another account
+        with pytest.raises(Exception, match="bound account"):
+            b.quote("EUR_USD")
+        with pytest.raises(Exception, match="bound account"):
+            b.submit(self._intent(), timeout_ms=1000)
+        assert fake.sent_requests == []
+        server.stop()
+
+    def test_the_lot_ceiling_and_the_stop_are_enforced_at_the_bridge(self):
+        fake = FakeMT5()
+        server, b = self._server(fake, max_lots=0.05)
+        res = b.submit(self._intent(lots="0.10"), timeout_ms=1000)
+        assert res.state is OrderState.REJECTED and "ceiling" in (res.reject_reason or "")
+        assert fake.sent_requests == []
+        res = b.submit(self._intent(lots="0.05", coid="SFXenv0002"), timeout_ms=1000)
+        assert res.state is OrderState.FILLED
+        server.stop()
+
+    def test_a_live_account_is_refused_unless_allowed(self):
+        fake = FakeMT5()
+        fake.account.trade_mode = 2
+        server, b = self._server(fake)
+        res = b.submit(self._intent(), timeout_ms=1000)
+        assert res.state is OrderState.REJECTED and "allow-live" in (res.reject_reason or "")
+        assert fake.sent_requests == []
+        server.stop()
+        server, b = self._server(fake, allow_live=True)
+        assert b.submit(self._intent(coid="SFXenv0003"), timeout_ms=1000).state is OrderState.FILLED
+        server.stop()
+
+    def test_a_resend_of_the_same_order_replays_not_repeats(self):
+        fake = FakeMT5()
+        server, b = self._server(fake)
+        first = b.submit(self._intent(coid="SFXenv0004"), timeout_ms=1000)
+        assert first.state is OrderState.FILLED
+        # The OMS would never do this on MT5 (retries are zero), but a second
+        # process, or a restart that lost the OMS state, could.
+        again = b.submit(self._intent(coid="SFXenv0004"), timeout_ms=1000)
+        assert again.state is OrderState.FILLED
+        assert len(fake.sent_requests) == 1, "the terminal saw one order, not two"
+        assert len(fake._positions) == 1
+        server.stop()
+
+    def test_the_same_id_with_a_different_request_is_refused(self):
+        """Below the adapter (which dedupes by id itself), a second process
+        that reuses an id for a different order is stopped at the bridge."""
+        from sentinel.brokers.mt5_bridge import BridgeRefused
+        fake = FakeMT5()
+        server, b = self._server(fake)
+        client = b._mt5
+        req = dict(fake.sent_requests[0]) if fake.sent_requests else None
+        base = {"action": 1, "symbol": "EURUSD", "volume": 0.05, "type": 0, "price": 1.1,
+                "sl": 1.09, "magic": 1, "comment": "SFXenv0005", "type_filling": 1}
+        assert client.order_send(base).retcode == 10009
+        with pytest.raises(BridgeRefused, match="different request"):
+            client.order_send({**base, "volume": 0.10})
+        assert len(fake.sent_requests) == 1
+        server.stop()
+
+    def test_an_unknown_outcome_latches_until_cleared(self, tmp_path):
+        from sentinel.brokers.mt5_bridge import BridgeEnvelope
+        fake = FakeMT5()
+        env = BridgeEnvelope(journal_path=str(tmp_path / "writes.json"))
+        server = BridgeServer(fake, token=TOKEN, host="127.0.0.1", port=0, envelope=env)
+        host, port = server.start()
+        b = MT5Broker(profile=get_profile("generic_mt5"), mt5_module=BridgeMT5(host, port, token=TOKEN))
+        real = fake.order_send
+
+        def explode(req):
+            real(req)                          # the terminal DID act...
+            raise RuntimeError("socket dropped")   # ...but the reply never came
+        fake.order_send = explode
+        from sentinel.core.errors import UnknownOutcomeError
+        with pytest.raises(UnknownOutcomeError):
+            b.submit(self._intent(coid="SFXenv0006"), timeout_ms=1000)
+        fake.order_send = real
+        # The adapter's own query-before-resend finds the deal by signature;
+        # below it, the bridge journal has the id with no outcome and refuses
+        # a raw resend. Either way: no second position.
+        client = b._mt5
+        from sentinel.brokers.mt5_bridge import BridgeRefused
+        with pytest.raises(BridgeRefused, match="outcome is unknown"):
+            client.order_send(dict(fake.sent_requests[0]))
+        assert len(fake._positions) == 1, "no second position"
+        # The journal survives a bridge restart.
+        server.stop()
+        env2 = BridgeEnvelope(journal_path=str(tmp_path / "writes.json"))
+        assert "SFXenv0006" in env2._journal and env2._journal["SFXenv0006"].get("outcome") is None
+        assert env2.clear("SFXenv0006") is True

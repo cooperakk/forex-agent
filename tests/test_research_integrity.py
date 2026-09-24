@@ -232,8 +232,11 @@ class TestDataLabel:
         df = pd.DataFrame({"timestamp": idx, "open": 1.1, "high": 1.11, "low": 1.09,
                            "close": 1.1, "volume": 10, "carry_bp": 120.0})
         if with_ba:
-            df["bid"] = 1.0999
-            df["ask"] = 1.1001
+            # The venue's own bid and ask OHLC -- a single bid/ask column is a
+            # closing quote, not a history the spread can be charged from.
+            for f, v in (("open", 1.1), ("high", 1.11), ("low", 1.09), ("close", 1.1)):
+                df[f"bid_{f}"] = v - 0.0001
+                df[f"ask_{f}"] = v + 0.0001
         df.to_csv(tmp_path / "EUR_USD.csv", index=False)
         return tmp_path
 
@@ -252,7 +255,7 @@ class TestDataLabel:
 
     def test_the_importer_keeps_the_columns_the_strategies_need(self, script, tmp_path):
         u = script.load_bars(self._csv_dir(tmp_path, with_ba=True))
-        assert {"bid", "ask", "carry_bp", "volume"} <= set(u["EUR_USD"].columns)
+        assert {"bid_close", "ask_close", "carry_bp", "volume"} <= set(u["EUR_USD"].columns)
 
 
 # --------------------------------------------------------------------------- #

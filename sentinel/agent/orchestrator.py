@@ -153,6 +153,7 @@ class Agent:
         on_cycle: Optional[Callable[[CycleReport], None]] = None,
         clock_fn: Optional[Callable[[], int]] = None,
         news: Optional[NewsPolicy] = None,
+        meta_gate: Any = None,
     ) -> None:
         self.config = config
         self.broker = broker
@@ -166,6 +167,23 @@ class Agent:
         self._clock_fn = clock_fn or wall_ns
         self.news = news
         self._news_assessment: Dict[str, NewsAssessment] = {}
+        # The meta-label filter: a fitted act/skip model consulted BEFORE the
+        # risk engine. Injected, or loaded from agent.meta_model_path. A model
+        # that cannot be loaded passes everything through and says so once.
+        self.meta_gate = meta_gate
+        if self.meta_gate is None and config.agent.meta_model_path:
+            try:
+                from ..research.metalabel import MetaGate
+                self.meta_gate = MetaGate.load(config.agent.meta_model_path)
+                audit.append(EventType.SYSTEM_START, {
+                    "meta_model": config.agent.meta_model_path,
+                    "sha256": self.meta_gate.sha256,
+                    "threshold": self.meta_gate.labeler.report.threshold})
+            except Exception as exc:  # noqa: BLE001 - a broken filter is not a stopped agent
+                audit.append(EventType.SYSTEM_START, {
+                    "meta_model": config.agent.meta_model_path,
+                    "load_failed": str(exc)[:200],
+                    "effect": "every primary signal passes through unfiltered"})
 
         self.risk = RiskEngine(config.risk)
         self.oms = OrderManager(broker, audit,
@@ -234,6 +252,19 @@ class Agent:
         self._pending_signals: List[Signal] = []
         self._advisory_queue: List[Decision] = []
         self._seq = 0
+        #: strategy -> reason, set by the performance guard. A suspended
+        #: strategy opens nothing until a human clears it; positions it already
+        #: holds are still managed.
+        self._guard_suspended: Dict[str, str] = {}
+        #: The owner's cross-account ledger, when this engine is in a group.
+        self._group = None
+        if config.ops.group_ledger_dir:
+            from ..risk.portfolio import GroupLedger
+            self._group = GroupLedger(
+                config.ops.group_ledger_dir,
+                config.execution.expected_account_id or broker.capabilities.name,
+                stale_after_sec=config.risk.group_ledger_stale_sec)
+        self._group_view = None
 
     def now(self) -> int:
         return int(self._clock_fn())
@@ -270,16 +301,27 @@ class Agent:
             # on restart, and an unbounded set would grow without limit.
             "processed_trades": sorted(self.processed_trades)[-5000:],
             "trade_cursor": self._trade_cursor,
+            "guard_suspended": dict(self._guard_suspended),
             "saved_ns": self.now(),
         }
         try:
+            import os as _os
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.state_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            import os as _os
+            # fsync before the rename: the peak equity and the ladder rung are
+            # what a restart measures every loss budget against, and a rename
+            # of an unflushed file can survive a power loss as an empty file.
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False))
+                handle.flush()
+                _os.fsync(handle.fileno())
             _os.replace(tmp, self.state_path)
         except OSError as exc:  # pragma: no cover - disk failure
+            # A state that cannot be persisted is a drawdown budget that a
+            # restart will forget. Refuse new risk until a human looks.
             self.audit.append(EventType.SYSTEM_START, {"state_save_failed": str(exc)})
+            self.halted = True
+            self.halt_reason = f"state persistence failed ({exc}); new entries refused"
 
     def _load_state(self) -> bool:
         if not self.state_path.exists():
@@ -287,7 +329,13 @@ class Agent:
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
+            # Unreadable is NOT "fresh". A fresh state resets the equity peak,
+            # the ladder rung and every period baseline to zero -- an agent
+            # 8% down would resume at full size. Halt, and say what to restore.
             self.audit.append(EventType.SYSTEM_START, {"state_load_failed": str(exc)})
+            self.halted = True
+            self.halt_reason = (f"agent state at {self.state_path} is unreadable ({exc}); "
+                                "restore it from a backup before resuming")
             return False
         self.equity_peak = dec(data.get("equity_peak", 0))
         self.equity_peak_marked = dec(data.get("equity_peak_marked", 0))
@@ -327,10 +375,26 @@ class Agent:
                 "provisional": meta.get("provisional") == "True",
                 "partial_taken": meta.get("partial_taken") == "True",
                 "breakeven_moved": meta.get("breakeven_moved") == "True",
+                # The rest of what the venue cannot tell us. Dropping these on
+                # restart made _local_book() report every position at zero lots
+                # and zero entry (a size_drift for the reconciler), reset the
+                # give-back ratchet's peak (re-arming a stop already tightened)
+                # and lost the horizon stop.
+                "lots": dec(meta.get("lots", 0) or 0),
+                "entry_price": dec(meta.get("entry_price", 0) or 0),
+                "stop_loss": (dec(meta["stop_loss"]) if meta.get("stop_loss")
+                              not in (None, "", "None") else None),
+                "max_favourable": dec(meta.get("max_favourable", 0) or 0),
+                "max_adverse": dec(meta.get("max_adverse", 0) or 0),
+                "max_hold_sec": int(float(meta.get("max_hold_sec", 0) or 0)),
+                "intended_risk": dec(meta.get("intended_risk", 0) or 0),
             }
+        self._guard_suspended = {str(k): str(v) for k, v in
+                                 (data.get("guard_suspended") or {}).items()}
         self.audit.append(EventType.SYSTEM_START, {
             "state_restored": True, "equity_peak": str(self.equity_peak),
-            "drawdown_budget_carried": True, "halted": self.halted})
+            "drawdown_budget_carried": True, "halted": self.halted,
+            "guard_suspended": sorted(self._guard_suspended)})
         return True
 
     # ------------------------------------------------------------------ #
@@ -403,7 +467,9 @@ class Agent:
                     sent.add(coid)
                 elif rec["event"] in terminal:
                     done.add(coid)
-        except (OSError, ValueError):  # pragma: no cover - unreadable journal
+        except (OSError, ValueError) as exc:  # unreadable is not empty
+            self.halt(f"the order journal cannot be read ({exc}); orders sent before the "
+                      "last restart cannot be resolved, so no new risk is taken")
             return []
         return sorted(sent - done)
 
@@ -570,15 +636,25 @@ class Agent:
                 # lesson store is keyed by, so a constant label meant the agent
                 # could never learn "this strategy only works in a trend" --
                 # the exact question the module exists to answer.
-                from ..strategy.base import adx as _adx_fn
+                from ..strategy.base import _frame_key, adx as _adx_fn
                 adx_values = {}
+                cache = getattr(self, "_adx_cache", {})
                 for sym, f in frames.items():
                     try:
+                        # Memoised on the frame's identity: the same H4 frame
+                        # arrives on ~240 consecutive 60-second cycles.
+                        key = _frame_key(f)
+                        hit = cache.get(sym)
+                        if hit is not None and hit[0] == key:
+                            adx_values[sym] = hit[1]
+                            continue
                         series = _adx_fn(f, 14)
                         if len(series) and pd.notna(series.iloc[-1]):
                             adx_values[sym] = float(series.iloc[-1])
+                            cache[sym] = (key, adx_values[sym])
                     except Exception:  # noqa: BLE001 - one bad frame is not fatal
                         continue
+                self._adx_cache = cache
                 self.regime = classify(frames, idx, adx_values=adx_values or None)
                 report.regime = self.regime.to_dict()
             except Exception as exc:  # noqa: BLE001
@@ -594,6 +670,7 @@ class Agent:
 
         # --- 5. build the risk context -------------------------------------- #
         correlations = self._correlations(frames) if frames else {}
+        self._group_view = self._publish_group(now, account, positions)
         ctx = self._build_context(now, account, positions, snap, connected, health,
                                   correlations=correlations)
         alarms = self.risk.portfolio_alarms(ctx)
@@ -814,7 +891,10 @@ class Agent:
             # as though it were normal, wrong in both directions at once.
             self._observe_spread(sym, spread)
             normal_spreads[sym] = self._normal_spread(sym, spread)
-            cost_models[sym] = CostModel(spread_pips=spread)
+            cost_models[sym] = CostModel(
+                spread_pips=spread,
+                commission_per_lot_round_turn=cfg.execution.commission_per_lot_round_turn,
+                slippage_pips_median=cfg.execution.expected_slippage_pips)
 
         return RiskContext(
             now_ns=now_ns, account=account, positions=positions, instruments=instruments,
@@ -848,7 +928,48 @@ class Agent:
             kill_switch=self.kill.read().engaged,
             strategy_lifecycles=lifecycles,
             live_money=cfg.execution.venue_mode is ExecutionVenueMode.LIVE,
+            group_others_open_risk=(self._group_view.others_open_risk
+                                    if self._group_view is not None else None),
+            group_others_equity=(self._group_view.others_equity
+                                 if self._group_view is not None else ZERO),
+            group_others_currency_risk=(dict(self._group_view.others_currency_risk)
+                                        if self._group_view is not None else {}),
+            group_unknown_members=(sorted(set(self._group_view.stale)
+                                          | set(self._group_view.unreadable))
+                                   if self._group_view is not None else []),
         )
+
+    def _publish_group(self, now_ns: int, account, positions):
+        """Write this engine's row to the owner's ledger and read the others."""
+        if self._group is None:
+            return None
+        from ..risk.exposure import currency_exposure
+        from ..risk.portfolio import GroupRow
+        try:
+            instruments = self.broker.instruments()
+            conv = self._conversion_map()
+            risk_map = {p.instrument: (p.initial_risk or ZERO) for p in positions}
+            exposures = currency_exposure(list(positions), instruments,
+                                          risk_by_instrument=risk_map, conversions=conv,
+                                          account_currency=account.currency)
+            open_risk = sum((p.initial_risk or ZERO for p in positions), ZERO)
+            row = GroupRow(
+                account=self._group.account, currency=account.currency,
+                equity=account.equity, open_risk=open_risk,
+                pending_risk=self.oms.pending_risk(),
+                drawdown_pct=((self.equity_peak - account.equity) / self.equity_peak * D("100")
+                              if self.equity_peak > 0 else ZERO),
+                positions=len(positions),
+                currency_risk={c: e.net_risk for c, e in exposures.items()},
+                written_ns=now_ns, halted=self.halted)
+            self._group.publish(row)
+            return self._group.view(now_ns, conversions=conv, own_currency=account.currency)
+        except Exception as exc:  # noqa: BLE001 - the ledger must never break a cycle
+            self.audit.append(EventType.CONNECTIVITY, {"group_ledger_error": str(exc)[:200]})
+            from ..risk.portfolio import GroupView
+            v = GroupView()
+            v.unreadable.append("ledger")
+            return v
 
     # ------------------------------------------------------------------ #
 
@@ -1242,7 +1363,15 @@ class Agent:
             self._track_excursion(pos, quote, inst, conv)
 
             atr_val = None
-            frame = snap.frames.get(pos.instrument)
+            # The ATR of the timeframe the position's STRATEGY runs on. A daily
+            # system trailed on a four-hour ATR is trailed a quarter as wide as
+            # it was validated with.
+            alloc = next((a for a in cfg.strategies if a.name == pos.strategy), None)
+            frame = None
+            if alloc is not None and alloc.timeframe:
+                frame = snap.frames_for(alloc.timeframe).get(pos.instrument)
+            if frame is None:
+                frame = snap.frames.get(pos.instrument)
             if frame is not None and len(frame) > 20:
                 from ..strategy.base import atr as _atr
                 series = _atr(frame, 14)
@@ -1328,6 +1457,23 @@ class Agent:
                       "cannot exit is not a position it may leave unattended")
             return False
         if res.state in (OrderState.FILLED, OrderState.PARTIAL):
+            # Confirm against the book. A PARTIAL close leaves a residual the
+            # agent would otherwise forget it owns.
+            try:
+                remaining = [p for p in self.broker.positions()
+                             if p.instrument == pos.instrument]
+            except Exception as exc:  # noqa: BLE001
+                remaining = []
+                self.audit.append(EventType.POSITION_CLOSE,
+                                  {"instrument": pos.instrument, "reason": reason,
+                                   "post_close_read_failed": str(exc)})
+            if remaining:
+                self.audit.append(EventType.POSITION_CLOSE,
+                                  {"instrument": pos.instrument, "reason": reason,
+                                   "closed": False, "residual_lots": str(remaining[0].lots)})
+                self.halt(f"{pos.instrument} closed only partially; the residual position "
+                          "needs a human before any new risk")
+                return False
             self.audit.append(EventType.POSITION_CLOSE,
                               {"instrument": pos.instrument, "reason": reason,
                                "closed": True})
@@ -1368,6 +1514,13 @@ class Agent:
 
         for alloc in cfg.strategies:
             if not alloc.enabled or alloc.name not in self.strategies:
+                continue
+            if alloc.name in self._guard_suspended:
+                decisions.append(Decision(
+                    ts_ns=now_ns, strategy=alloc.name, instrument="*", action="skipped",
+                    regime=regime_name,
+                    rationale="suspended by the performance guard: "
+                              + self._guard_suspended[alloc.name]))
                 continue
             if not can_trade(alloc.lifecycle,
                              cfg.execution.venue_mode is ExecutionVenueMode.LIVE):
@@ -1469,6 +1622,41 @@ class Agent:
             caution = float(min(dec(caution), assessment.size_multiplier))
             decision.lessons.extend(assessment.reasons[:2])
 
+        # The meta-label gate: whether to act on THIS primary signal at all,
+        # from the state it was raised in. It runs before the risk engine so a
+        # skipped signal costs nothing, and it can only shrink -- its size
+        # multiplier joins the caution product.
+        if self.meta_gate is not None:
+            try:
+                from ..research.metalabel import bar_context_features
+                frame = snap.frames_for(signal.timeframe).get(signal.instrument) \
+                    if snap is not None else None
+                context = bar_context_features(frame, len(frame) - 1) \
+                    if frame is not None and len(frame) else {}
+                act, p, scale = self.meta_gate.decide(signal, context)
+                decision.diagnostics["meta_features"] = {
+                    **{f"sig_{k}": float(v) for k, v in (signal.features or {}).items()},
+                    "strength": float(signal.strength), **context}
+                if p is not None:
+                    decision.diagnostics["meta_probability"] = round(float(p), 4)
+                if not act:
+                    decision.action = "skipped"
+                    decision.vetoes = [{"rule": "meta_label",
+                                        "message": f"act probability {p:.2f} below the "
+                                                   f"filter's threshold "
+                                                   f"{self.meta_gate.labeler.report.threshold:.2f}",
+                                        "severity": "block"}]
+                    decision.explanation = (f"{signal.strategy} sees {signal.side.value} "
+                                            f"{signal.instrument}, but the meta-label filter "
+                                            f"rates this setup at {p:.2f}: skipped.")
+                    self.audit.append(EventType.SIGNAL, decision.to_dict())
+                    return decision
+                if scale < 1.0:
+                    caution = float(min(caution, max(0.0, scale)))
+                    decision.lessons.append(f"meta-label filter scales size by {scale:.2f}")
+            except Exception as exc:  # noqa: BLE001 - never let the filter stop the loop
+                self.audit.append(EventType.SIGNAL, {"meta_gate_error": str(exc)[:200]})
+
         # No process-local counter: (account, strategy, instrument, side, bar)
         # identifies exactly one intent, and a restarted process replaying the
         # same bar must produce the same key or the venue cannot deduplicate.
@@ -1547,7 +1735,14 @@ class Agent:
         if mode is AgentMode.ADVISORY or (
                 mode is AgentMode.SEMI_AUTO and not self._within_envelope(intent)):
             decision.action = "queued"
+            # One proposal per intent, and a bounded queue: a strategy that
+            # re-raises the same signal every cycle for a week must not fill
+            # memory with ten thousand copies of one idea.
+            self._advisory_queue = [d for d in self._advisory_queue
+                                    if d.client_order_id != decision.client_order_id]
             self._advisory_queue.append(decision)
+            if len(self._advisory_queue) > 500:
+                self._advisory_queue = self._advisory_queue[-500:]
             self.audit.append(EventType.PROPOSAL, decision.to_dict())
             return decision
 
@@ -1729,6 +1924,17 @@ class Agent:
                       None)
         if target is None:
             return None
+        if not self._in_session(self.now()):
+            # The agent itself would not enter now; a human clicking "accept"
+            # at 03:00 on a Sunday does not change what the session rule is for.
+            self.audit.append(EventType.PROPOSAL_REJECTED,
+                              {"client_order_id": client_order_id,
+                               "reason": "accepted outside the permitted session"}, actor=by)
+            target.action = "vetoed"
+            target.vetoes.append({"rule": "out_of_session",
+                                  "message": "entries are not permitted at this hour/day",
+                                  "severity": "block"})
+            return target
         self._advisory_queue.remove(target)
         snap = self.feed.snapshot([target.instrument], now_ns=self.now())
         quote = snap.quotes.get(target.instrument)
@@ -1860,6 +2066,70 @@ class Agent:
             return None
         return (pips / r) * float(inst.pip)
 
+    def _performance_guard(self, strategy_name: str) -> None:
+        """Suspend a strategy whose realised R is demonstrably negative.
+
+        Over the most recent ``performance_guard_min_trades`` closed trades,
+        the mean R is estimated from five block means (blocks, because losses
+        cluster in time and consecutive trades are not independent draws), and
+        a one-sided 95% upper confidence bound is formed with Student's t on
+        four degrees of freedom. If even that generous bound is below zero,
+        the strategy has spent its evidence: it opens nothing further until a
+        human reviews it. Nothing in the agent lifts the suspension.
+
+        This is not a profitability test -- passing it says only "not yet
+        proven to lose". It exists because a strategy that IS losing must not
+        get to keep proving it with the account's money.
+        """
+        if not self.config.agent.performance_guard_enabled:
+            return
+        if strategy_name in self._guard_suspended:
+            return
+        count = int(self.config.agent.performance_guard_min_trades)
+        records = self.memory.autopsies(strategy_name, limit=count)
+        if len(records) < count:
+            return
+        try:
+            import numpy as np
+            from scipy.stats import t as student_t
+            values = np.array([float(r["r_multiple"]) for r in records[:count]], dtype=float)
+            values = values[np.isfinite(values)]
+            if values.size < count:
+                return
+            blocks = np.array([b.mean() for b in np.array_split(values, 5)])
+            spread = float(blocks.std(ddof=1))
+            if not np.isfinite(spread):
+                return
+            upper = float(blocks.mean() + student_t.ppf(0.95, 4) * spread / np.sqrt(5))
+        except Exception as exc:  # noqa: BLE001 - a guard that crashes protects nothing
+            self.audit.append(EventType.LESSON,
+                              {"performance_guard_error": str(exc), "strategy": strategy_name})
+            return
+        if upper < 0:
+            reason = (f"{count} closed trades, mean R {float(values.mean()):+.3f}, "
+                      f"95% upper bound {upper:+.3f} < 0")
+            self._guard_suspended[strategy_name] = reason
+            self.audit.append(EventType.HALT, {
+                "performance_guard": True, "strategy": strategy_name, "reason": reason,
+                "effect": "no new entries for this strategy; open positions still managed; "
+                          "a human clears it with Agent.release_guard"})
+            self._save_state()
+
+    def release_guard(self, strategy_name: str, by: str) -> bool:
+        """Only a human releases a performance suspension."""
+        if strategy_name not in self._guard_suspended:
+            return False
+        reason = self._guard_suspended.pop(strategy_name)
+        self.audit.append(EventType.MODE_CHANGE,
+                          {"performance_guard_released": strategy_name, "was": reason},
+                          actor=by)
+        self._save_state()
+        return True
+
+    @property
+    def guard_suspended(self) -> Dict[str, str]:
+        return dict(self._guard_suspended)
+
     def _learn(self) -> tuple[int, int]:
         if not self.config.agent.learning_enabled:
             return 0, 0
@@ -1871,6 +2141,15 @@ class Agent:
             if not trade.regime:
                 # Entry-time regime, captured when the position was opened.
                 trade.regime = self._entry_regime.get(trade.instrument, "")
+            if trade.initial_risk <= 0:
+                # No R, no lesson. A trade whose risk the agent cannot attribute
+                # (opened by hand, or before the journal existed) is history,
+                # not evidence; feeding it into the R-denominated statistics
+                # would teach a lesson about a number that was never defined.
+                self.audit.append(EventType.LESSON, {
+                    "trade_id": trade.trade_id, "learning_skipped": "no risk attribution",
+                    "pnl_kept_in_history": str(trade.pnl)})
+                continue
             a = autopsy(trade, path=self._trade_path(trade))
             self.memory.record_autopsy(a.to_dict())
             self.audit.append(EventType.POSTMORTEM, a.to_dict())
@@ -1890,6 +2169,8 @@ class Agent:
             scopes.add(None)
         for strategy_name in scopes:
             total = self.memory.autopsy_count(strategy_name)
+            if strategy_name and total >= self.config.agent.performance_guard_min_trades:
+                self._performance_guard(strategy_name)
             if total < self.config.agent.proposal_min_sample:
                 continue
             records = self.memory.autopsies(strategy_name, limit=1000)

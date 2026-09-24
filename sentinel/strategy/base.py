@@ -92,7 +92,27 @@ class Strategy(abc.ABC):
         return pd.DataFrame(index=df.index)
 
     def prepare(self, data: Dict[str, pd.DataFrame]) -> None:
-        self._pre = {sym: self.indicators(df) for sym, df in data.items()}
+        """Compute the indicator frames, once per DISTINCT input frame.
+
+        The live loop calls this every cycle, and most cycles bring no new
+        bar: a 60-second loop on H4 data sees the same frame 240 times in a
+        row. Every indicator here is causal, so an unchanged frame has an
+        unchanged indicator frame, and recomputing it is pure cost -- in the
+        agent replay it was 40% of the run. The key is the frame's shape and
+        its first/last stamps and last close, which is what changes when a bar
+        arrives or is revised.
+        """
+        pre: Dict[str, pd.DataFrame] = {}
+        keys = getattr(self, "_pre_keys", {})
+        for sym, df in data.items():
+            key = _frame_key(df)
+            if key is not None and keys.get(sym) == key and sym in self._pre:
+                pre[sym] = self._pre[sym]
+                continue
+            pre[sym] = self.indicators(df)
+            keys[sym] = key
+        self._pre = pre
+        self._pre_keys = keys
 
     def features_at(self, instrument: str, df: pd.DataFrame, index: int) -> pd.Series:
         """Indicator row at ``index``, computing on a window if not prepared."""
@@ -122,6 +142,17 @@ class Strategy(abc.ABC):
                 "horizon_bars": self.meta.horizon_bars,
                 "hypothesis": self.meta.hypothesis,
                 "failure_conditions": self.meta.failure_conditions}
+
+
+def _frame_key(df: pd.DataFrame):
+    """Cheap identity of a bar frame: (rows, first stamp, last stamp, last close)."""
+    try:
+        n = len(df)
+        if n == 0:
+            return (0,)
+        return (n, int(df.index[0].value), int(df.index[-1].value), float(df["close"].iloc[-1]))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------- #

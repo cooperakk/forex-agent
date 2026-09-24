@@ -32,11 +32,13 @@ The wire format is JSON lines. It is deliberately boring: any future bridge
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -50,8 +52,8 @@ _CALL_TIMEOUT_S = 30.0
 ALLOWED_METHODS = frozenset({
     "initialize", "shutdown", "last_error", "terminal_info", "account_info",
     "symbols_get", "symbol_info", "symbol_info_tick", "symbol_select",
-    "copy_rates_from_pos", "positions_get", "orders_get", "history_deals_get",
-    "order_send", "version",
+    "copy_rates_from_pos", "copy_ticks_range", "positions_get", "orders_get",
+    "history_deals_get", "order_send", "version",
 })
 
 
@@ -163,9 +165,15 @@ class BridgeServer:
 
     def __init__(self, module: Any, *, token: str, host: str = "127.0.0.1",
                  port: int = DEFAULT_PORT, allow_remote: bool = False,
-                 log: Optional[Callable[[str], None]] = None) -> None:
+                 log: Optional[Callable[[str], None]] = None,
+                 envelope: Optional["BridgeEnvelope"] = None) -> None:
         if not token or len(token) < 16:
             raise ValueError("the bridge token must be at least 16 characters")
+        #: The second lock on the venue, enforced HERE, beside the terminal:
+        #: account binding, a lot ceiling, a live gate and a write journal.
+        #: The engine has its own risk engine and OMS; this one exists for the
+        #: day the engine is wrong, compromised, or simply another process.
+        self.envelope = envelope or BridgeEnvelope()
         if not _is_loopback(host) and not allow_remote:
             raise ValueError(
                 f"refusing to bind {host}: the bridge carries the account password. "
@@ -287,15 +295,179 @@ class BridgeServer:
         kwargs = _decode_args(req.get("kwargs") or {})
         with self._lock:
             self.calls += 1
+            # Every call after the first re-reads the terminal's identity. A
+            # terminal signed into another account answers every method for
+            # that account, and nothing in the protocol says so.
+            refusal = self.envelope.check_account(self.module, method)
+            if refusal:
+                self.rejected += 1
+                return {"id": rid, "ok": False, "error": refusal}
+            journal_key = None
+            if method == "order_send":
+                refusal, journal_key, replay = self.envelope.check_order(self.module, args, kwargs)
+                if refusal:
+                    self.rejected += 1
+                    return {"id": rid, "ok": False, "error": refusal}
+                if replay is not None:
+                    return {"id": rid, "ok": True, "result": replay, "replayed": True}
             try:
                 result = fn(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001 - the caller gets the text
+                if journal_key:
+                    self.envelope.record_outcome(journal_key, None)
                 return {"id": rid, "ok": False,
                         "error": f"{exc.__class__.__name__}: {exc}"}
+            try:
+                encoded = _encode(result)
+            except Exception as exc:  # noqa: BLE001
+                if journal_key:
+                    self.envelope.record_outcome(journal_key, None)
+                return {"id": rid, "ok": False, "error": f"unencodable result: {exc}"}
+            if journal_key:
+                self.envelope.record_outcome(journal_key, encoded)
+            return {"id": rid, "ok": True, "result": encoded}
+
+
+class BridgeEnvelope:
+    """What the bridge will do for the engine, and what it refuses.
+
+    * **Account binding.** On the first call the terminal's account id and
+      server are recorded; every later call that finds them changed is refused
+      ("all routing refused"). Set ``account_id``/``server`` explicitly to
+      bind before any call.
+    * **Order envelope.** ``order_send`` is refused above ``max_lots``, without
+      a stop, for a symbol outside ``symbols`` when that set is given, and on
+      a LIVE account unless ``allow_live`` is set.
+    * **Write journal.** Every ``order_send`` is journalled by the request's
+      ``comment`` (the engine's client order id) BEFORE the terminal is
+      called, with a hash of the request. A resend with the same id and the
+      same body replays the recorded outcome; the same id with a different
+      body is refused; an id whose first attempt has no recorded outcome is
+      refused until an operator clears it -- because "the socket dropped
+      between order_send and the reply" is exactly the state where a resend
+      opens a second position, and MetaTrader cannot deduplicate it.
+    """
+
+    def __init__(self, *, account_id: Optional[str] = None, server: Optional[str] = None,
+                 max_lots: float = 0.5, allow_live: bool = False,
+                 symbols: Optional[set] = None, journal_path: Optional[str] = None) -> None:
+        self.account_id = str(account_id) if account_id else None
+        self.server = str(server) if server else None
+        self.max_lots = float(max_lots)
+        self.allow_live = bool(allow_live)
+        self.symbols = set(symbols) if symbols else None
+        self._journal_path = journal_path
+        self._journal: Dict[str, Dict[str, Any]] = {}
+        self._account_type: Optional[str] = None
+        if journal_path:
+            try:
+                with open(journal_path, encoding="utf-8") as fh:
+                    self._journal = json.load(fh)
+            except FileNotFoundError:
+                self._journal = {}
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"the bridge write journal at {journal_path} is unreadable "
+                                 f"({exc}); an empty journal would forget every in-flight "
+                                 "order") from exc
+
+    # -- binding ---------------------------------------------------------- #
+
+    def check_account(self, module: Any, method: str) -> Optional[str]:
+        if method in ("initialize", "shutdown", "last_error", "version", "terminal_info"):
+            return None
         try:
-            return {"id": rid, "ok": True, "result": _encode(result)}
+            info = module.account_info()
         except Exception as exc:  # noqa: BLE001
-            return {"id": rid, "ok": False, "error": f"unencodable result: {exc}"}
+            return f"account unreadable; routing refused: {exc}"
+        if info is None:
+            return "terminal is not signed in; routing refused"
+        login = str(getattr(info, "login", "") or "")
+        server = str(getattr(info, "server", "") or "")
+        mode = getattr(info, "trade_mode", None)
+        try:
+            self._account_type = {0: "demo", 1: "demo", 2: "live"}.get(int(mode), "") \
+                if mode is not None else ""
+        except (TypeError, ValueError):
+            self._account_type = ""
+        if self.account_id is None:
+            self.account_id, self.server = login, server
+            return None
+        if login != self.account_id:
+            return (f"terminal account {login!r} is not the bound account "
+                    f"{self.account_id!r}; all routing refused")
+        if self.server and server and server != self.server:
+            return (f"terminal server {server!r} is not the bound server "
+                    f"{self.server!r}; all routing refused")
+        return None
+
+    # -- orders ----------------------------------------------------------- #
+
+    def check_order(self, module: Any, args: list, kwargs: dict):
+        request = args[0] if args else kwargs.get("request")
+        if not isinstance(request, dict):
+            return "order_send needs a request dict", None, None
+        deal = getattr(module, "TRADE_ACTION_DEAL", 1)
+        action = request.get("action")
+        if action == deal and "position" not in request:
+            # A NEW position: the envelope applies. Closes and stop changes
+            # (SLTP, or a deal carrying a position id) reduce risk and pass.
+            if self._account_type == "live" and not self.allow_live:
+                return "live account: the bridge was started without --allow-live", None, None
+            if self._account_type not in ("demo", "live"):
+                return "account type unknown; the bridge will not open a position", None, None
+            try:
+                lots = float(request.get("volume", 0))
+            except (TypeError, ValueError):
+                return "order volume is not a number", None, None
+            if lots <= 0 or lots > self.max_lots:
+                return f"volume {lots} outside the bridge ceiling of {self.max_lots} lots", None, None
+            if not request.get("sl"):
+                return "a new position without a stop-loss is refused by the bridge", None, None
+            symbol = str(request.get("symbol", ""))
+            if self.symbols is not None and symbol not in self.symbols:
+                return f"{symbol!r} is outside the bridge's symbol envelope", None, None
+        key = str(request.get("comment") or "")
+        if not key:
+            return None, None, None          # no id: nothing to journal against
+        body = json.dumps(request, sort_keys=True, default=str)
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        prior = self._journal.get(key)
+        if prior is not None:
+            if prior.get("hash") != digest:
+                return f"order id {key!r} reused with a different request", None, None
+            if "outcome" not in prior or prior["outcome"] is None:
+                return (f"order id {key!r} was sent before and its outcome is unknown; "
+                        "do not resend -- reconcile against the terminal's deals"), None, None
+            return None, None, prior["outcome"]
+        self._journal[key] = {"hash": digest, "sent_at": time.time()}
+        self._persist()
+        return None, key, None
+
+    def record_outcome(self, key: str, outcome: Any) -> None:
+        entry = self._journal.get(key)
+        if entry is None:
+            return
+        entry["outcome"] = outcome
+        entry["done_at"] = time.time()
+        self._persist()
+
+    def clear(self, key: str) -> bool:
+        """An operator, having reconciled, releases a stuck id."""
+        if key in self._journal:
+            del self._journal[key]
+            self._persist()
+            return True
+        return False
+
+    def _persist(self) -> None:
+        if not self._journal_path:
+            return
+        tmp = self._journal_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self._journal, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self._journal_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -304,7 +476,16 @@ class BridgeServer:
 
 
 class BridgeError(RuntimeError):
-    pass
+    """Transport or protocol failure talking to the bridge."""
+
+
+class BridgeRefused(BridgeError):
+    """The bridge's envelope refused the request BEFORE the terminal saw it.
+
+    Distinct from a transport failure on purpose: a refusal is a certain
+    'nothing happened' and the adapter reports it as a rejection, while a
+    dropped socket during ``order_send`` is an unknown outcome.
+    """
 
 
 class BridgeMT5:
@@ -390,6 +571,8 @@ class BridgeMT5:
                 err = str(reply.get("error", "bridge error"))
                 if err == "unauthorised":
                     raise BridgeError("mt5 bridge rejected the token")
+                if _looks_like_refusal(err):
+                    raise BridgeRefused(err)
                 raise BridgeError(err)
             return reply.get("result")
 
@@ -447,7 +630,19 @@ class BridgeMT5:
         return _wrap(res) if res is not None else None
 
     def order_send(self, request: Dict[str, Any]) -> Any:
+        """Send an order. A refusal by the envelope raises ``BridgeRefused``
+        (nothing reached the terminal); a transport failure raises
+        ``BridgeError``, and the caller must treat that as UNKNOWN."""
         return _wrap(self._call("order_send", dict(request)))
+
+
+_REFUSAL_MARKERS = ("routing refused", "ceiling", "refused by the bridge", "allow-live",
+                    "envelope", "reused with a different request", "outcome is unknown",
+                    "account type unknown", "not signed in", "not bridged", "needs a request")
+
+
+def _looks_like_refusal(message: str) -> bool:
+    return any(m in message for m in _REFUSAL_MARKERS)
 
 
 # --------------------------------------------------------------------------- #

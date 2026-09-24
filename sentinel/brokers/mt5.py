@@ -34,8 +34,8 @@ from ..core.clock import wall_ns
 from ..core.errors import BrokerError, ConfigError, ConversionMissingError, UnknownOutcomeError
 from ..core.money import D, Instrument, dec
 from ..core.types import (
-    AccountState, Bar, Fill, Order, OrderIntent, OrderState, OrderType, Position, Quote,
-    Side,
+    AccountState, Bar, ClosedTrade, Fill, Order, OrderIntent, OrderState, OrderType,
+    Position, Quote, Side,
 )
 from .base import Broker, BrokerCapabilities, SubmitResult
 
@@ -84,6 +84,28 @@ def _field(row: Any, name: str, default: Any = None) -> Any:
     return getattr(row, name, default)
 
 
+def _exit_reason_from_comment(comment: str) -> str:
+    """The short exit code the agent wrote into the closing deal's comment.
+
+    The agent closes with ``reason=code[:32]`` (weekend_flat, time_stop,
+    giveback, partial_take ...); the terminal also writes its own markers
+    ("[sl]", "[tp]", "so:" for stop-out). Map what can be mapped and keep
+    the rest verbatim so the post-mortem never confuses a venue stop-out
+    with a strategy exit.
+    """
+    text = (comment or "").strip()
+    if text.lower().startswith("close:"):
+        text = text[6:].strip()                 # the adapter's own close marker
+    low = text.lower()
+    if "[sl]" in low or low.startswith("sl "):
+        return "stop_loss"
+    if "[tp]" in low or low.startswith("tp "):
+        return "take_profit"
+    if low.startswith("so:") or "stop out" in low:
+        return "margin_stop_out"
+    return text[:32] or "venue_history"
+
+
 def _trade_mode(account: Any) -> int:
     """The terminal's ACCOUNT_TRADE_MODE, or -1 when it did not say.
 
@@ -110,7 +132,16 @@ class MT5Broker(Broker):
                  server: Optional[str] = None,
                  terminal_path: Optional[str] = None,
                  connect_timeout_ms: int = 30_000,
-                 mt5_module: Any = None) -> None:
+                 mt5_module: Any = None,
+                 state_path: Optional[str] = None) -> None:
+        # The intent journal. MT5 has no client order id, so the only way to
+        # answer "did my order go through?" after a restart is to remember what
+        # was sent -- instrument, side, lots, time, risk -- and match deals
+        # against it. Held only in memory, a crash between order_send and the
+        # response lost the one record that could resolve the UNKNOWN state,
+        # and the realised-history attribution (which strategy, what risk)
+        # with it.
+        self._state_path = str(state_path) if state_path else None
         if mt5_module is not None:
             mt5 = mt5_module
         else:
@@ -310,6 +341,21 @@ class MT5Broker(Broker):
         #: fallback. See _server_offset_sec.
         self._server_offset_sec: Optional[int] = None
         self._server_offset_measured_ns: int = 0
+        if self._state_path:
+            import json as _json
+            from pathlib import Path as _Path
+            journal = _Path(self._state_path)
+            if journal.exists():
+                try:
+                    loaded = _json.loads(journal.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        self._sent.update(loaded)
+                except (ValueError, OSError) as exc:
+                    # Unreadable is not empty: an empty journal would make every
+                    # in-flight order from before the restart invisible.
+                    raise ConfigError(
+                        f"the MT5 intent journal at {journal} is unreadable ({exc}); "
+                        "restore it or move it aside deliberately") from exc
 
     # -- helpers ------------------------------------------------------------ #
 
@@ -467,7 +513,12 @@ class MT5Broker(Broker):
             self._building = False
 
     def _build_instruments_inner(self) -> Dict[str, Instrument]:
-        raw = list(self._mt5.symbols_get() or [])
+        # SYMBOL_TRADE_MODE_DISABLED == 0: an indicative or retired symbol. It
+        # still has a name and digits, so without this filter "EURUSD" on a
+        # book where only "EURUSD.m" is tradeable could win the translation and
+        # every order would be refused with a message about the symbol.
+        raw = [s for s in (self._mt5.symbols_get() or [])
+               if int(getattr(s, "trade_mode", 4) or 0) != 0]
 
         # A profile that declares no symbol convention infers one from the
         # terminal's own list, rather than guessing a suffix and failing on
@@ -694,7 +745,24 @@ class MT5Broker(Broker):
 
     def positions(self) -> List[Position]:
         out: List[Position] = []
-        for p in self._mt5.positions_get() or []:
+        book = self._mt5.positions_get()
+        if book is None:
+            # None is "the terminal could not answer", which is not "no
+            # positions". Returning [] here made the reconciler drop every
+            # known position as a phantom on the first blink of the link.
+            raise BrokerError("MT5 position book unavailable", code="BOOK_UNAVAILABLE")
+        symbols = [p.symbol for p in book]
+        if len(symbols) != len(set(symbols)):
+            # A hedging account can hold two tickets on one symbol. The agent
+            # keys everything on (instrument, side) and the reconciler maps one
+            # position per instrument, so a second ticket would be silently
+            # collapsed into the first. Refuse rather than guess; the account
+            # this engine trades must be its own.
+            dupes = sorted({s for s in symbols if symbols.count(s) > 1})
+            raise BrokerError(
+                f"multiple tickets on {', '.join(dupes)}: this engine needs a dedicated "
+                "account with at most one position per symbol", code="MULTI_TICKET")
+        for p in book:
             out.append(Position(
                 instrument=self._canon(p.symbol),
                 side=Side.BUY if p.type == self._mt5.POSITION_TYPE_BUY else Side.SELL,
@@ -764,14 +832,44 @@ class MT5Broker(Broker):
             self._sent[intent.client_order_id] = {
                 "instrument": intent.instrument, "side": intent.side.value,
                 "lots": float(intent.lots), "ts_ns": wall_ns(),
+                "initial_risk": str(intent.risk_amount), "strategy": intent.strategy,
             }
-            result = mt5.order_send(request)
+            self._persist_sent()
+            try:
+                result = mt5.order_send(request)
+            except Exception as exc:  # noqa: BLE001
+                # Over the bridge, an envelope refusal is a certain "nothing
+                # happened" -> a rejection. Anything else from order_send --
+                # a dropped socket, a terminal exception -- is an outcome the
+                # adapter cannot know, and MetaTrader cannot deduplicate.
+                name = exc.__class__.__name__
+                if name == "BridgeRefused":
+                    self._sent.pop(intent.client_order_id, None)
+                    self._persist_sent()
+                    return SubmitResult(state=OrderState.REJECTED,
+                                        reject_reason=f"BRIDGE_REFUSED: {exc}"[:200],
+                                        raw={"bridge": True})
+                self._blackout[intent.instrument] = wall_ns() + _BLACKOUT_NS
+                raise UnknownOutcomeError(f"order_send failed mid-flight: {exc}",
+                                          instrument=intent.instrument) from exc
             if result is None:
                 self._blackout[intent.instrument] = wall_ns() + _BLACKOUT_NS
                 raise UnknownOutcomeError("order_send returned no result",
                                           instrument=intent.instrument,
                                           last_error=str(mt5.last_error()))
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
+            # TIMEOUT (10012) and CONNECTION (10031) mean the request left
+            # and no answer came back. Treating them as rejections told the OMS
+            # nothing happened while the venue may have filled -- the exact
+            # state UNKNOWN exists for. PARTIAL (10010) is a fill of some of it.
+            partial = int(getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010))
+            ambiguous = {int(getattr(mt5, "TRADE_RETCODE_TIMEOUT", 10012)),
+                         int(getattr(mt5, "TRADE_RETCODE_CONNECTION", 10031))}
+            if int(result.retcode) in ambiguous:
+                self._blackout[intent.instrument] = wall_ns() + _BLACKOUT_NS
+                raise UnknownOutcomeError(
+                    f"MT5 returned retcode {result.retcode}: the order may have executed",
+                    instrument=intent.instrument, retcode=int(result.retcode))
+            if int(result.retcode) not in (int(mt5.TRADE_RETCODE_DONE), partial):
                 return SubmitResult(state=OrderState.REJECTED,
                                     reject_reason=f"RETCODE_{result.retcode}",
                                     raw={"comment": getattr(result, "comment", "")})
@@ -796,7 +894,10 @@ class MT5Broker(Broker):
                                     if str(p.ticket) == str(result.order)
                                     or str(p.identifier) == str(result.order)), None)
                     if applied is None:
-                        applied = max((float(p.sl) for p in live), default=0.0)
+                        # Only the ticket this order opened counts. Reading the
+                        # stop off ANY position on the symbol reported an older
+                        # ticket's stop as this one's.
+                        applied = 0.0
                     if not applied:
                         stop_confirmed = False
                         stop_reason = ("the terminal applied no stop-loss: the "
@@ -805,12 +906,38 @@ class MT5Broker(Broker):
                 except Exception as exc:  # noqa: BLE001
                     stop_confirmed = False
                     stop_reason = f"could not read the stop back from MT5: {exc}"
-            return SubmitResult(state=OrderState.FILLED, venue_order_id=str(result.order),
+            return SubmitResult(state=(OrderState.PARTIAL if int(result.retcode) == partial
+                                       else OrderState.FILLED),
+                                venue_order_id=str(result.order),
                                 fills=[fill], venue_ts_ns=fill.ts_ns,
                                 stop_confirmed=stop_confirmed,
                                 stop_reject_reason=stop_reason)
         finally:
             lock.release()
+
+    def _persist_sent(self) -> None:
+        """Write the intent journal atomically, before the socket is touched."""
+        if not self._state_path:
+            return
+        import json as _json
+        import os as _os
+        from pathlib import Path as _Path
+        journal = _Path(self._state_path)
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        tmp = journal.with_suffix(journal.suffix + ".tmp")
+        fd = _os.open(tmp, _os.O_CREAT | _os.O_TRUNC | _os.O_WRONLY, 0o600)
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+                _json.dump(self._sent, fh)
+                fh.flush()
+                _os.fsync(fh.fileno())
+        except Exception:
+            try:
+                _os.close(fd)
+            except OSError:
+                pass
+            raise
+        _os.replace(tmp, journal)
 
     def query_order(self, client_order_id: str) -> Optional[SubmitResult]:
         """Signature match over recent deals -- the best MT5 allows."""
@@ -899,6 +1026,166 @@ class MT5Broker(Broker):
         # placed on a position that does not exist here. reconcile.py acts on
         # that by marking the position protected and rewriting its risk.
         return ok and touched
+
+    # -- realised history ------------------------------------------------- #
+    #
+    # Every post-mortem, lesson and proposal is built on closed trades, and
+    # on MetaTrader none of that ran: the adapter exposed no history, so the
+    # learning loop was disabled with a one-line audit note and the dashboard
+    # looked perfectly healthy. The terminal keeps every deal; a round trip is
+    # the set of deals sharing a position id, and its P&L is the sum of their
+    # profit, commission, fee and swap -- the venue's own numbers, which is
+    # the only P&L worth learning from.
+
+    @property
+    def supports_closed_trade_history(self) -> bool:
+        return True
+
+    def fetch_closed_trades(self, since_id: str = "") -> tuple[List[ClosedTrade], str]:
+        from collections import defaultdict
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            cursor_ms, cursor_pid = (int(x) for x in (since_id or "0:0").split(":"))
+        except ValueError as exc:
+            raise ValueError(f"invalid MT5 history cursor {since_id!r}") from exc
+        # Deals since the cursor, with a day of margin so a round trip whose
+        # opening deal predates the cursor is still assembled whole. Reading
+        # from 1970 on every cycle would grow with the account's age.
+        lower = (datetime.fromtimestamp(cursor_ms / 1000, tz=timezone.utc)
+                 - timedelta(days=45)) if cursor_ms else datetime(2000, 1, 1, tzinfo=timezone.utc)
+        deals = self._mt5.history_deals_get(lower, datetime.now(timezone.utc) + timedelta(days=1))
+        if deals is None:
+            raise BrokerError("MT5 realised history unavailable", code="HISTORY_UNAVAILABLE")
+        book = self._mt5.positions_get()
+        if book is None:
+            raise BrokerError("MT5 position book unavailable", code="BOOK_UNAVAILABLE")
+        open_ids = {int(getattr(p, "identifier", p.ticket) or p.ticket) for p in book}
+
+        grouped: Dict[int, list] = defaultdict(list)
+        for deal in deals:
+            pid = int(getattr(deal, "position_id", 0) or 0)
+            if pid:
+                grouped[pid].append(deal)
+
+        by_comment = {k[:31]: (k, v) for k, v in self._sent.items()}
+        out: List[ClosedTrade] = []
+        cursor = (cursor_ms, cursor_pid)
+        for pid, values in grouped.items():
+            if pid in open_ids:
+                continue                      # still open: not a round trip yet
+            values.sort(key=lambda d: (int(d.time_msc), int(d.ticket)))
+            end = (int(values[-1].time_msc), pid)
+            if end <= (cursor_ms, cursor_pid):
+                continue
+            # DEAL_ENTRY_IN=0, OUT=1, INOUT=2 (reversal), OUT_BY=3.
+            entries = [d for d in values if int(getattr(d, "entry", 0)) == 0]
+            exits = [d for d in values if int(getattr(d, "entry", 0)) in (1, 3)]
+            if not entries or not exits or any(int(getattr(d, "entry", 0)) == 2 for d in values):
+                continue                      # a reversal needs a deal ledger; never guess
+            if any(int(getattr(d, "magic", 0) or 0) != self._magic for d in entries):
+                continue                      # not this engine's trade
+            vol_in = sum((dec(d.volume) for d in entries), D("0"))
+            vol_out = sum((dec(d.volume) for d in exits), D("0"))
+            if vol_in <= 0 or abs(vol_in - vol_out) > D("0.000001"):
+                continue                      # partially closed: wait for the rest
+            sym = self._canon(entries[0].symbol)
+            inst = self.instruments().get(sym)
+            if inst is None:
+                continue
+            entry_px = sum((dec(d.price) * dec(d.volume) for d in entries), D("0")) / vol_in
+            exit_px = sum((dec(d.price) * dec(d.volume) for d in exits), D("0")) / vol_out
+            side = Side.BUY if int(entries[0].type) == int(self._mt5.ORDER_TYPE_BUY) else Side.SELL
+            comment = str(getattr(entries[0], "comment", "") or "")
+            coid, meta = by_comment.get(comment[:31], ("", {}))
+            initial = dec(meta.get("initial_risk", 0) or 0)
+            # Venue amounts arrive as floats and are money in the account
+            # currency: quantise to the cent, which is what the statement
+            # shows, rather than carry binary noise into R.
+            cent = D("0.01")
+            profit = sum((dec(getattr(d, "profit", 0) or 0) for d in values), D("0")).quantize(cent)
+            fees = sum((dec(getattr(d, "commission", 0) or 0)
+                        + dec(getattr(d, "fee", 0) or 0) for d in values), D("0")).quantize(cent)
+            swap = sum((dec(getattr(d, "swap", 0) or 0) for d in values), D("0")).quantize(cent)
+            net = profit + fees + swap          # fees and swap are negative when charged
+            exit_comment = str(getattr(exits[-1], "comment", "") or "")
+            out.append(ClosedTrade(
+                trade_id=f"MT5-{pid}", strategy=str(meta.get("strategy") or "unattributed"),
+                instrument=sym, side=side, lots=vol_in,
+                entry_price=entry_px, exit_price=exit_px,
+                opened_ns=int(entries[0].time_msc) * 1_000_000, closed_ns=end[0] * 1_000_000,
+                pnl=net, pnl_pips=(exit_px - entry_px) * D(side.sign) / inst.pip,
+                commission=-fees, financing=swap, initial_risk=initial,
+                r_multiple=(net / initial) if initial > 0 else D("0"),
+                exit_reason=_exit_reason_from_comment(exit_comment),
+                tags=([] if initial > 0 else ["risk_attribution_unavailable"])
+                + ([f"coid:{coid}"] if coid else []),
+            ))
+            cursor = max(cursor, end)
+        out.sort(key=lambda t: (t.closed_ns, t.trade_id))
+        return out, f"{cursor[0]}:{cursor[1]}"
+
+    def swap_pips_per_day(self, symbol: str) -> tuple[Optional[Decimal], Optional[Decimal]]:
+        """(long, short) overnight swap for one lot, in PIPS, as the venue quotes it.
+
+        The cost model used to carry a zero swap unless the operator typed one.
+        The terminal states the real figure per symbol; a carry strategy whose
+        whole premise is the swap must read this, not a default.
+        """
+        info = self._mt5.symbol_info(self._venue(symbol))
+        if info is None:
+            return None, None
+        inst = self.instruments().get(symbol)
+        if inst is None:
+            return None, None
+        mode = int(getattr(info, "swap_mode", 1) or 1)
+        long_raw = getattr(info, "swap_long", None)
+        short_raw = getattr(info, "swap_short", None)
+        if long_raw is None or short_raw is None:
+            return None, None
+        # SYMBOL_SWAP_MODE_POINTS == 1: swap is in points of the symbol.
+        # Other modes (currency, percent) need the contract and the price;
+        # report None rather than a number in the wrong unit.
+        if mode != 1:
+            return None, None
+        point = inst.tick
+        return (dec(long_raw) * point / inst.pip, dec(short_raw) * point / inst.pip)
+
+    def fetch_ticks(self, symbol: str, start_ns: int, end_ns: int,
+                    max_ticks: int = 2_000_000) -> List[tuple]:
+        """Raw (utc_ms, bid, ask) ticks between two instants, oldest first.
+
+        This is the venue's own bid AND ask history -- the input the research
+        protocol demands for a live-quality dataset, which a bid candle plus a
+        stored spread can never reconstruct. ``data/ticks.py`` turns these into
+        bid/ask OHLC bars with the manifest the acceptance script verifies.
+        """
+        from datetime import datetime, timezone
+        getter = getattr(self._mt5, "copy_ticks_range", None)
+        if getter is None:
+            raise BrokerError("this terminal module has no copy_ticks_range", code="NO_TICKS")
+        offset = self._server_offset_seconds()
+        flags = int(getattr(self._mt5, "COPY_TICKS_INFO", 1))
+        lo = datetime.fromtimestamp(start_ns / 1e9 + offset, tz=timezone.utc)
+        hi = datetime.fromtimestamp(end_ns / 1e9 + offset, tz=timezone.utc)
+        ticks = getter(self._venue(symbol), lo, hi, flags)
+        if ticks is None:
+            raise BrokerError(f"no ticks for {symbol}: {self._mt5.last_error()}", code="NO_TICKS")
+        out: List[tuple] = []
+        for row in ticks:
+            try:
+                ms = int(_field(row, "time_msc"))
+                bid = float(_field(row, "bid"))
+                ask = float(_field(row, "ask"))
+            except (TypeError, ValueError, KeyError):
+                continue
+            if bid <= 0 or ask <= 0:
+                continue
+            out.append((ms - offset * 1000, bid, ask))
+            if len(out) >= max_ticks:
+                break
+        out.sort()
+        return out
 
     def transactions_since(self, last_id: str) -> Iterable[Dict[str, Any]]:
         return []  # no ordered stream; reconciliation is snapshot-based

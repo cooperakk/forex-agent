@@ -53,8 +53,9 @@ CONVERSIONS = {"USD": D("1"), "JPY": D("1") / D("150"), "CHF": D("1") / D("0.88"
 #: Columns beyond OHLCV that a strategy or a gate may need, kept when present.
 #: `bid`/`ask` are what makes a file "live-quality" at all; `carry_bp` is the
 #: carry family's whole input and was being dropped by the importer.
-_EXTRA_COLUMNS = ("bid", "ask", "bid_close", "ask_close", "spread", "carry_bp",
-                  "swap_long", "swap_short")
+_EXTRA_COLUMNS = ("bid", "ask", "spread", "carry_bp", "swap_long", "swap_short",
+                  "bid_open", "bid_high", "bid_low", "bid_close",
+                  "ask_open", "ask_high", "ask_low", "ask_close")
 
 
 def load_bars(directory: Path) -> dict[str, pd.DataFrame]:
@@ -101,9 +102,8 @@ def data_quality_label(universe: dict[str, pd.DataFrame], requested: str | None)
     which made the strongest claim in the protocol the one that needed the
     least evidence.)
     """
-    has_ba = all(("bid" in df.columns or "bid_close" in df.columns)
-                 and ("ask" in df.columns or "ask_close" in df.columns)
-                 for df in universe.values())
+    from sentinel.data.validation import has_bid_ask
+    has_ba = all(has_bid_ask(df) for df in universe.values())
     if requested == "live-quality":
         if not has_ba:
             raise SystemExit(
@@ -194,13 +194,51 @@ def main() -> int:
                          "oanda, generic_mt5, paper); defaults to the config's")
     ap.add_argument("--variants", type=int, default=8,
                     help="parameter neighbours to evaluate for PBO / SPA / CPCV")
+    ap.add_argument("--engine", choices=["agent", "rules"], default="agent",
+                    help="'agent' replays the production loop (required for L11); "
+                         "'rules' is the fast exploratory harness")
+    ap.add_argument("--execution-bars", default=None,
+                    help="directory of FINER per-instrument CSVs (M1/M5) that drive "
+                         "execution in the agent replay; omit to drive it with the "
+                         "decision bars (L11 then fails, honestly)")
+    ap.add_argument("--manifest", default=None,
+                    help="dataset manifest (scripts/make_manifest.py) for the decision "
+                         "bars; required for the live-quality label to count")
+    ap.add_argument("--forward", default=None,
+                    help="forward-record manifest of a demo/live run under this "
+                         "configuration (gate L12)")
+    ap.add_argument("--venue-probe", default=None,
+                    help="read-only venue probe JSON (scripts/probe_account.py) for the "
+                         "environment gates")
+    ap.add_argument("--news", default=None,
+                    help="CSV of dated historical releases (timestamp_utc,currency,name,"
+                         "impact) replayed at the simulated clock")
+    ap.add_argument("--meta-label", action="store_true",
+                    help="fit a meta-label act/skip filter on the FIRST part of the "
+                         "history and evaluate everything on the rest; the filter is "
+                         "consulted before every entry in both engines")
+    ap.add_argument("--meta-train-fraction", type=float, default=0.6)
+    ap.add_argument("--save-meta", default=None,
+                    help="write the fitted filter here (set agent.meta_model_path to it)")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
 
+    provenance = {}
     if args.bars:
         universe = load_bars(Path(args.bars))
         label = data_quality_label(universe, args.data_label)
+        if args.manifest:
+            from sentinel.research.evidence import verify_dataset
+            try:
+                provenance = verify_dataset(Path(args.bars), universe, Path(args.manifest))
+                print(f"[acceptance] dataset verified: broker {provenance['broker']}, "
+                      f"{len(provenance['sha256'])} files, bid/ask present")
+            except ValueError as exc:
+                raise SystemExit(f"dataset manifest verification failed: {exc}")
+        elif label == "live-quality":
+            print("[acceptance] WARNING: --manifest not supplied; the live-quality label "
+                  "cannot be verified by content and gate L10 will fail.")
     else:
         universe = generate_universe(n_bars=args.n_bars, bars_per_day=6,
                                      dollar_factor_strength=0.6)
@@ -213,6 +251,45 @@ def main() -> int:
     research: ResearchConfig = cfg.research
     strategy = build_strategy(args.strategy)
     instruments = {k: v for k, v in INSTRUMENTS.items() if k in universe}
+
+    execution_data = None
+    if args.execution_bars:
+        execution_data = load_bars(Path(args.execution_bars))
+        missing = sorted(set(universe) - set(execution_data))
+        if missing:
+            raise SystemExit(f"--execution-bars has no file for {missing}")
+        execution_data = {k: v for k, v in execution_data.items() if k in universe}
+        # The execution bars must span the decision bars, on one clock.
+        for sym, df in execution_data.items():
+            lo, hi = universe[sym].index[0], universe[sym].index[-1]
+            execution_data[sym] = df[(df.index >= lo) & (df.index <= hi + pd.Timedelta(hours=24))]
+    news_source = None
+    if args.news:
+        from sentinel.news.schedule import HistoricalCalendarSource
+        news_source = HistoricalCalendarSource(Path(args.news))
+        print(f"[acceptance] {len(news_source.rows)} dated releases will be replayed")
+
+    forward = {}
+    if args.forward:
+        from sentinel.research.evidence import verify_forward
+        expected = config_fingerprint(sorted(universe), dict(strategy.params),
+                                      strategy.meta.timeframe, runtime_config=cfg)
+        try:
+            forward = verify_forward(Path(args.forward), expected)
+            print(f"[acceptance] forward record verified: {forward['n_trades']} trades, "
+                  f"net {forward['net_pnl']:+.2f}, max DD {forward['max_drawdown_pct']:.2f}%")
+        except ValueError as exc:
+            print(f"[acceptance] forward record REJECTED: {exc}")
+            forward = {"verified": False, "reason": str(exc)}
+
+    venue_probe = None
+    if args.venue_probe:
+        from sentinel.research.evidence import verify_venue
+        try:
+            venue_probe = verify_venue(Path(args.venue_probe), cfg)
+            print(f"[acceptance] venue probe verified for account {venue_probe['account_id']}")
+        except ValueError as exc:
+            raise SystemExit(f"venue probe rejected: {exc}")
 
     # The venue the verdict is FOR. Its declared capabilities feed the
     # environment gates (L0.3, L0.4); they were hard-coded True, which is not
@@ -266,29 +343,71 @@ def main() -> int:
                   weekend_flat=risk.weekend_flat,
                   friday_close_utc_hour=risk.friday_close_utc_hour)
 
-    def bt(strat, label_, *, kind="search", **kw):
+    def bt(strat, label_, *, kind="search", engine=None, **kw):
+        eng = engine or args.engine
+        extra = dict(gating)
+        if eng == "agent":
+            extra.update(runtime_config=cfg, execution_data=execution_data,
+                         news_source=news_source)
         return run_backtest(strat, universe, instruments, risk,
                             BacktestConfig(label=label_, data_label=label,
-                                           trial_kind=kind,
+                                           trial_kind=kind, engine=eng,
                                            periods_per_year=args.periods_per_year,
-                                           **gating, **kw),
+                                           **extra, **kw),
                             conversions=CONVERSIONS)
+
+    meta_gate = None
+    meta_report = {}
+    if args.meta_label:
+        from sentinel.research.metalabel import fit_meta_gate, split_for_meta
+        train, hold = split_for_meta(universe, args.meta_train_fraction)
+        print(f"[acceptance] meta-label: fitting on {len(next(iter(train.values())))} bars, "
+              f"evaluating on {len(next(iter(hold.values())))}")
+        # The training run is a SEARCH trial: primary + filter is a
+        # configuration chosen among others.
+        fit_run = run_backtest(build_strategy(args.strategy), train, instruments, risk,
+                               BacktestConfig(label="meta-fit", data_label=label,
+                                              trial_kind="search", engine="rules",
+                                              periods_per_year=args.periods_per_year,
+                                              **gating),
+                               conversions=CONVERSIONS)
+        meta_gate, meta_report = fit_meta_gate(fit_run.signal_log)
+        if meta_gate is None:
+            print(f"[acceptance] meta-label filter NOT fitted: {meta_report.get('notes') or meta_report.get('reason')}")
+        else:
+            print(f"[acceptance] meta-label filter fitted: threshold "
+                  f"{float(meta_report.get('threshold') or 0):.2f}, AUC {float(meta_report.get('auc') or 0):.3f}, "
+                  f"recall {meta_report.get('recall', 0):.0%}, "
+                  f"calibrated={meta_report.get('calibrated')}")
+            if args.save_meta:
+                digest = meta_gate.save(args.save_meta)
+                print(f"[acceptance] filter saved: {args.save_meta} (sha256 {digest[:16]}...)")
+        # Every gate below runs on the holdout only. The training window is
+        # spent; scoring on it would score the filter on its own answers.
+        universe = hold
+        if execution_data is not None:
+            cut = next(iter(hold.values())).index[0]
+            execution_data = {k: v[v.index >= cut] for k, v in execution_data.items()}
 
     print(f"[acceptance] candidate: {args.strategy} ({family} family) on "
           f"{sorted(universe)} ({label})")
-    candidate = bt(strategy, "candidate")
+    candidate = bt(strategy, "candidate", meta_gate=meta_gate)
     # Baselines, the stress pass and the CPCV folds are VALIDATION of a
     # configuration already counted, not additional draws from the search
     # distribution. Counting them would penalise thorough validation, which is
     # the behaviour this system wants more of, not less.
+    # Baselines and the variant family run on the fast harness: they are
+    # yardsticks and a search family, not the thing being certified. The
+    # candidate and its stress pass run on the engine asked for.
     baselines = {
-        "no_trade": bt(NoTrade(), "no_trade", kind="validation"),
-        "coin_flip": bt(CoinFlip(), "coin_flip", kind="validation"),
-        "buy_and_hold": bt(BuyAndHold(), "buy_and_hold", kind="validation"),
+        "no_trade": bt(NoTrade(), "no_trade", kind="validation", engine="rules"),
+        "coin_flip": bt(CoinFlip(), "coin_flip", kind="validation", engine="rules"),
+        "buy_and_hold": bt(BuyAndHold(), "buy_and_hold", kind="validation", engine="rules"),
     }
     stressed = bt(build_strategy(args.strategy), "stressed", kind="validation",
                   cost_multiplier=research.cost_stress_multiple,
-                  latency_multiplier=research.latency_stress_multiple)
+                  latency_multiplier=research.latency_stress_multiple,
+                  meta_gate=meta_gate)
 
     # The family of configurations the candidate was chosen from. Each one IS
     # a search trial, and the matrix of their returns is the input to three
@@ -298,7 +417,8 @@ def main() -> int:
     variant_results = []
     for j, params in enumerate(variant_params):
         try:
-            v = bt(build_strategy(args.strategy, **params), f"var{j}", kind="search")
+            v = bt(build_strategy(args.strategy, **params), f"var{j}", kind="search",
+                   engine="rules", meta_gate=meta_gate)
             variant_results.append((params, v.per_bar_returns))
         except (TypeError, ValueError) as exc:
             print(f"[acceptance] variant {j} ({params}) skipped: {exc}")
@@ -350,13 +470,24 @@ def main() -> int:
     # Environment gates against the venue's OWN declaration, and its cost.
     round_trip = profile.default_spread_pips + (
         profile.commission_per_lot_round_turn / D("10") if profile.commission_per_lot_round_turn else D("0"))
-    env = environment_gates(
+    env_kwargs = dict(
         instrument=instruments.get("EUR_USD", next(iter(instruments.values()))),
         equity=D("10000"), risk_pct=risk.risk_per_trade_pct,
         stop_pips=D("30"), target_pips=D("75"),
         round_trip_cost_pips=round_trip + D("0.2"), pip_value_per_lot=D("10"),
         broker_supports_client_order_id=bool(profile.supports_client_order_id),
         broker_supports_server_stop=bool(profile.supports_server_side_stop))
+    if venue_probe:
+        # The account's OWN numbers replace the profile's declarations.
+        env_kwargs.update(
+            equity=D(str(venue_probe["equity"])),
+            round_trip_cost_pips=D(str(venue_probe["round_trip_cost_pips"])),
+            pip_value_per_lot=D(str(venue_probe["pip_value_per_lot"])),
+            broker_supports_server_stop=bool(venue_probe.get("server_stops_observed")),
+            broker_supports_client_order_id=bool(
+                (venue_probe.get("capabilities") or {}).get("supports_client_order_id",
+                                                             profile.supports_client_order_id)))
+    env = environment_gates(**env_kwargs)
 
     # Read the ledger AFTER this run's own backtests have been recorded: a
     # trial you just ran is a trial that counts, and reading first would let a
@@ -379,8 +510,11 @@ def main() -> int:
         instruments=sorted(universe), params=dict(strategy.params),
         timeframe=strategy.meta.timeframe,
         cpcv_report=cpcv_report, venue_profile=profile.name,
+        provenance=provenance, forward=forward, runtime_config=cfg,
         store=store,   # the verdict is recorded here, pass or fail
     )
+    if meta_report:
+        verdict.evidence["meta_label"] = meta_report
 
     if args.json:
         print(json.dumps(verdict.to_dict(), ensure_ascii=False, indent=2))
@@ -402,6 +536,8 @@ def main() -> int:
         mark = "PASS" if g.passed else "FAIL"
         print(f"  [{mark}] {g.id:5s} {g.name:34s} {g.observed:46s} need {g.threshold}")
     print(f"\nconfiguration fingerprint: {verdict.config_hash}")
+    print("  (binds instruments, parameters, timeframe, the trading-path source and the "
+          "runtime policy; a forward record must carry this hash)")
     print(f"recorded in {store.path}")
     if verdict.accepted:
         print("\nTo promote, apply this allocation through the dashboard or API:")

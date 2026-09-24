@@ -16,7 +16,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sentinel-fx:1.3.0
+    image: sentinel-fx:1.4.0
     container_name: sentinel-engine
     restart: unless-stopped
     ports:
@@ -65,7 +65,7 @@ services:
   # decision loop; this catches a process that is gone entirely, including the
   # case where the container is up but the loop died silently.
   watchdog:
-    image: sentinel-fx:1.3.0
+    image: sentinel-fx:1.4.0
     container_name: sentinel-watchdog
     restart: unless-stopped
     depends_on:

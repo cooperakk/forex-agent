@@ -51,10 +51,10 @@ ssh ubuntu@203.0.113.10
 ## مرحلهٔ ۳ — فایل را به سرور بفرست (۵ دقیقه)
 
 یک PowerShell **دوم** روی ویندوز باز کن (نه داخل سرور) و از پوشه‌ای که
-`sentinel-fx-1.3.0.tar.gz` در آن است:
+`sentinel-fx-1.4.0.tar.gz` در آن است:
 
 ```powershell
-scp .\sentinel-fx-1.3.0.tar.gz ubuntu@203.0.113.10:~
+scp .\sentinel-fx-1.4.0.tar.gz ubuntu@203.0.113.10:~
 ```
 
 رمز را می‌پرسد؛ بعد فایل روی سرور است.
@@ -66,7 +66,7 @@ scp .\sentinel-fx-1.3.0.tar.gz ubuntu@203.0.113.10:~
 برگرد به پنجرهٔ **داخل سرور** و این سه خط را بزن:
 
 ```bash
-tar -xzf sentinel-fx-1.3.0.tar.gz
+tar -xzf sentinel-fx-1.4.0.tar.gz
 ```
 
 ```bash
@@ -134,7 +134,7 @@ ssh -N -L 8088:127.0.0.1:8088 ubuntu@203.0.113.10
 1. **متاتریدر ۵** را باز کن و با حساب **دمو** وارد شو (راهنمای ساخت
    حساب دمو: `docs/DEMO-WINDOWS-FA.md` مرحلهٔ ۲). پایین پنجره باید
    **Connected** باشد.
-2. همان فایل `sentinel-fx-1.3.0.tar.gz` را روی ویندوز هم باز کن (مثلاً در
+2. همان فایل `sentinel-fx-1.4.0.tar.gz` را روی ویندوز هم باز کن (مثلاً در
    `C:\sentinel`). به پوشهٔ `deploy\mt5-bridge` برو.
 3. روی `start-bridge.ps1` راست‌کلیک → **Run with PowerShell**. بار اول
    پایتون‌ لازم را نصب می‌کند. در آخر چاپ می‌کند:

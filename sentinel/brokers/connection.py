@@ -92,7 +92,10 @@ class ReadOnlyBroker:
         "account", "positions", "open_orders", "query_order",
         "transactions_since", "fetch_closed_trades", "ping",
         "capabilities", "profile", "profile_mismatches",
-        "supports_closed_trade_history", "close",
+        "supports_closed_trade_history", "supports_bar_history", "close",
+        # Tick and swap reads for the history export; neither can reach the
+        # order path.
+        "fetch_bars", "fetch_ticks", "swap_pips_per_day", "min_stop_distance",
     })
     _WRITES = frozenset({
         "submit", "cancel", "close_position", "modify_position",

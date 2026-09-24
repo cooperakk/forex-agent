@@ -81,6 +81,13 @@ class _Symbol:
     trade_freeze_level: int = 0
     #: A BITMASK of permitted modes, as a real terminal reports it.
     filling_mode: int = SYMBOL_FILLING_IOC
+    #: SYMBOL_TRADE_MODE: 0 disabled, 4 full. Real terminals list retired and
+    #: indicative symbols with mode 0 beside the tradeable ones.
+    trade_mode: int = 4
+    #: Overnight swap in POINTS (swap_mode 1), long and short.
+    swap_mode: int = 1
+    swap_long: float = -7.2
+    swap_short: float = 2.1
 
 
 @dataclass
@@ -131,6 +138,11 @@ class _Account:
     margin_free: float = 10000.0
     leverage: int = 200
     profit: float = 0.0
+    #: ACCOUNT_TRADE_MODE: 0 demo, 1 contest, 2 real. Every real terminal
+    #: reports it; the bridge envelope refuses to open a position without it.
+    trade_mode: int = 0
+    server: str = "FakeBroker-Demo"
+    company: str = "Fake Broker Ltd"
 
 
 @dataclass
@@ -150,10 +162,16 @@ class _Deal:
     #: The order that produced the deal; the real TradeDeal carries it and the
     #: adapter's query_order reads it.
     order: int = 0
+    #: The position the deal belongs to. Entry and exit deals of one round trip
+    #: share it; the adapter's realised history is grouped on it.
+    position_id: int = 0
+    fee: float = 0.0
 
     def __post_init__(self):
         if not self.order:
             self.order = self.ticket
+        if not self.position_id:
+            self.position_id = self.ticket
 
 
 @dataclass
@@ -205,8 +223,12 @@ class FakeMT5:
                  symbols: Optional[List[str]] = None,
                  stops_by_symbol: Optional[Dict[str, int]] = None,
                  server_utc_offset_sec: int = 3 * 3600,
-                 history_bars: int = 400) -> None:
+                 history_bars: int = 400,
+                 disabled_symbols: Optional[List[str]] = None,
+                 commission_per_lot: float = 3.5) -> None:
         self.suffix = suffix
+        #: Per-side commission the fake charges on every deal, like an ECN book.
+        self.commission_per_lot = commission_per_lot
         #: Real terminals stamp bars and ticks in the broker's SERVER clock and
         #: the Python package presents that number as though it were UTC. The
         #: fake does the same, so the adapter's conversion is exercised.
@@ -236,6 +258,11 @@ class FakeMT5:
             "AUDUSD": _Tick(0.65000, 0.65014),
             "USDCHF": _Tick(0.88000, 0.88016),
         }
+        # Retired/indicative symbols: listed by the terminal, not tradeable.
+        for name in (disabled_symbols or []):
+            digits = 3 if name.endswith("JPY") else 5
+            self._symbols[name] = _Symbol(name=name, digits=digits, trade_mode=0,
+                                          trade_contract_size=contract_size)
         self._positions: List[_Position] = []
         self._deals: List[_Deal] = []
         self._next_ticket = 500001
@@ -377,10 +404,14 @@ class FakeMT5:
                 self._positions.remove(pos)
             ticket = self._next_ticket
             self._next_ticket += 1
+            sign = 1.0 if pos.type == POSITION_TYPE_BUY else -1.0
+            profit = (price - pos.price_open) * sign * closed * info.trade_contract_size
             self._deals.append(_Deal(ticket=ticket, symbol=symbol,
                                      type=order_type, volume=closed, price=price,
                                      magic=request.get("magic", 0),
-                                     comment=request.get("comment", ""), entry=1))
+                                     comment=request.get("comment", ""), entry=1,
+                                     position_id=pos.ticket, profit=round(profit, 2),
+                                     commission=-self.commission_per_lot * closed))
             return _Result(retcode=TRADE_RETCODE_DONE, order=ticket,
                            volume=closed, price=price)
 
@@ -395,9 +426,40 @@ class FakeMT5:
         self._deals.append(_Deal(ticket=ticket, symbol=symbol, type=order_type,
                                  volume=volume, price=price,
                                  magic=request.get("magic", 0),
-                                 comment=request.get("comment", ""), entry=0))
+                                 comment=request.get("comment", ""), entry=0,
+                                 position_id=ticket,
+                                 commission=-self.commission_per_lot * volume))
         return _Result(retcode=TRADE_RETCODE_DONE, order=ticket,
                        volume=volume, price=price)
+
+    # -- tick history ------------------------------------------------------ #
+
+    COPY_TICKS_INFO = 1
+
+    def copy_ticks_range(self, name: str, date_from, date_to, flags: int = 1):
+        """Synthetic bid/ask ticks, one every 15 s, stamped in SERVER time (ms)."""
+        core = name[: -len(self.suffix)] if self.suffix and name.endswith(self.suffix) \
+            else name
+        if name not in self._symbols or core not in self._ticks:
+            self._last_error = (4301, "unknown symbol")
+            return None
+        start = int(date_from.timestamp() * 1000)
+        end = int(date_to.timestamp() * 1000)
+        if end <= start:
+            return []
+        mid = (self._ticks[core].bid + self._ticks[core].ask) / 2.0
+        spread = self._ticks[core].ask - self._ticks[core].bid
+        rows = []
+        t = start
+        k = 0
+        while t < end and len(rows) < 200_000:
+            m = mid * (1.0 + 0.00002 * (((k * 37) % 11) - 5))
+            half = spread / 2.0 * (1.0 + 0.5 * ((k * 13) % 3))
+            rows.append({"time": t // 1000, "time_msc": t, "bid": m - half, "ask": m + half,
+                         "last": 0.0, "volume": 0, "flags": 6})
+            t += 15_000
+            k += 1
+        return rows
 
     # -- helpers -------------------------------------------------------- #
 

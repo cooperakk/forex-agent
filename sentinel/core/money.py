@@ -37,6 +37,8 @@ def dec(value) -> Decimal:
     "0.1" rather than becoming 0.1000000000000000055511151231257827).
     """
     if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError(f"cannot use non-finite Decimal {value!r} as a monetary value")
         return value
     if isinstance(value, bool):
         raise ValueError("refusing to convert a bool to a monetary value")
@@ -57,11 +59,11 @@ def dec(value) -> Decimal:
             pass
     if isinstance(value, str):
         try:
-            return Decimal(value.strip())
+            return dec(Decimal(value.strip()))
         except InvalidOperation as exc:
             raise ValueError(f"cannot convert {value!r} to Decimal") from exc
     try:
-        return Decimal(str(value))
+        return dec(Decimal(str(value)))
     except (InvalidOperation, ValueError, TypeError) as exc:
         try:
             return dec(float(value))
@@ -70,9 +72,21 @@ def dec(value) -> Decimal:
 
 
 def quantize(value: Decimal, exp: Decimal, rounding=ROUND_HALF_EVEN) -> Decimal:
+    """Snap ``value`` to the grid ``exp``.
+
+    A grid is a STEP, not a number of decimals: an index CFD ticks in 0.25 and
+    a lot step can be 0.05, and ``Decimal.quantize`` only knows about powers of
+    ten -- it would put 1.30 on a 0.25 grid. Divide, round to an integer count
+    of steps, multiply back, then quantize to the step's own precision so the
+    representation is canonical.
+    """
+    value, exp = dec(value), dec(exp)
+    if exp <= 0:
+        raise ValueError("a price or lot grid must be positive")
     with localcontext() as ctx:
         ctx.prec = 34
-        return value.quantize(exp, rounding=rounding)
+        steps = (value / exp).to_integral_value(rounding=rounding)
+        return (steps * exp).quantize(exp)
 
 
 class AssetClass(str, Enum):

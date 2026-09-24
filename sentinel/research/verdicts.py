@@ -25,18 +25,85 @@ from typing import Any, Dict, List, Optional
 from ..core.clock import wall_ns
 
 
-def config_fingerprint(instruments, params, timeframe: str) -> str:
+#: Files whose content decides what a strategy DOES with a signal. A change
+#: to any of them means the thing that was validated is no longer the thing
+#: that runs, so the fingerprint covers them and acceptance lapses.
+_SOURCE_SCOPE = ("core", "risk", "execution", "strategy", "agent", "research", "news")
+_source_digest_cache: dict = {}
+
+
+def source_digest() -> str:
+    """SHA-256 over the trading-relevant source of this checkout.
+
+    Computed once per process: the source does not change while it runs, and
+    hashing ~60 files on every fingerprint call would put a filesystem walk in
+    the promotion guard.
+    """
+    root = Path(__file__).resolve().parents[1]
+    key = str(root)
+    cached = _source_digest_cache.get(key)
+    if cached:
+        return cached
+    h = hashlib.sha256()
+    for sub in _SOURCE_SCOPE:
+        for file in sorted((root / sub).rglob("*.py")):
+            h.update(str(file.relative_to(root)).replace("\\", "/").encode("utf-8"))
+            h.update(file.read_bytes())
+    digest = h.hexdigest()
+    _source_digest_cache[key] = digest
+    return digest
+
+
+def runtime_policy(config=None) -> dict:
+    """The parts of a configuration that change what a signal becomes.
+
+    Risk limits, execution settings, news policy, research thresholds and the
+    agent's gating -- but NOT the mode or the venue, which are operating
+    choices about the same validated behaviour, not changes to it.
+    """
+    from ..core.config import SentinelConfig
+    data = config.model_dump(mode="json") if hasattr(config, "model_dump") else config
+    data = data or SentinelConfig().model_dump(mode="json")
+    agent = dict(data.get("agent", {}))
+    agent.pop("mode", None)
+    # The meta-model is identified by CONTENT, not by path: the same file
+    # name holding a different model is a different filter.
+    model_path = agent.pop("meta_model_path", None)
+    if model_path:
+        try:
+            agent["meta_model_sha256"] = hashlib.sha256(
+                Path(model_path).read_bytes()).hexdigest()
+        except OSError:
+            agent["meta_model_sha256"] = f"unreadable:{model_path}"
+    execution = dict(data.get("execution", {}))
+    for transient in ("venue_mode", "broker", "expected_account_id",
+                      "expected_account_server"):
+        execution.pop(transient, None)
+    return {"risk": data.get("risk"), "agent": agent, "execution": execution,
+            "news": data.get("news"), "research": data.get("research")}
+
+
+def config_fingerprint(instruments, params, timeframe: str, *, runtime_config=None) -> str:
     """Identity of the exact configuration a verdict was earned on.
 
     A verdict authorises a *configuration*, not a name. Without this, a strategy
     promoted on EUR_USD at H4 with a 55-bar channel could be re-pointed at four
     other pairs with a 5-bar channel while keeping the accepted badge and the
     same run id -- wearing evidence earned by a different strategy.
+
+    Schema 2 binds two more things the badge used to survive: the SOURCE of
+    the trading path (a changed exit rule is a different strategy) and the
+    RUNTIME POLICY (a doubled risk budget or a disabled news filter is a
+    different system). A verdict earned before either changed is not evidence
+    about what runs now, and the startup authority check demotes it.
     """
     body = json.dumps({
+        "schema": 2,
         "instruments": sorted(instruments or []),
         "params": params or {},
         "timeframe": timeframe or "",
+        "source_sha256": source_digest(),
+        "runtime": runtime_policy(runtime_config),
     }, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
 
@@ -95,7 +162,10 @@ class VerdictStore:
         payload = verdict.to_dict()
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO verdicts (run_id, strategy, accepted, created_ns,"
+                # INSERT, never REPLACE: a run id names one run. Overwriting it
+                # would let a later, flattering evaluation wear an earlier id
+                # that the configuration already references.
+                "INSERT INTO verdicts (run_id, strategy, accepted, created_ns,"
                 " stored_ns, data_label, summary, config_hash, payload)"
                 " VALUES (?,?,?,?,?,?,?,?,?)",
                 (verdict.run_id, verdict.strategy, 1 if verdict.accepted else 0,
@@ -223,7 +293,7 @@ def enforce_config_authority(config, store: "VerdictStore",
         if alloc.get("lifecycle") != "accepted":
             continue
         fingerprint = config_fingerprint(alloc.get("instruments"), alloc.get("params"),
-                                         alloc.get("timeframe"))
+                                         alloc.get("timeframe"), runtime_config=data)
         ok, why = store.authorises(alloc.get("name", ""), alloc.get("acceptance_run_id"),
                                    fingerprint)
         if not ok:
@@ -239,10 +309,15 @@ def enforce_config_authority(config, store: "VerdictStore",
         tradable = [a for a in data.get("strategies", [])
                     if a.get("enabled") and a.get("lifecycle") == "accepted"]
         if not tradable:
+            # OBSERVE, not paper. Forcing the venue to paper would DISCONNECT
+            # from a live account that may be holding positions: their stops,
+            # trails and the weekend flatten would go unmanaged. Observe keeps
+            # the venue and the book and refuses only new entries.
             violations.append(
                 "the configuration asks for live trading but no enabled strategy holds "
-                "a verified acceptance verdict; the venue mode is forced back to paper")
-            data["execution"]["venue_mode"] = ExecutionVenueMode.PAPER.value
+                "a verified acceptance verdict; new entries are disabled (observe mode) "
+                "while open positions stay managed")
+            data["agent"]["mode"] = "observe"
 
     if not violations:
         return config, [], False

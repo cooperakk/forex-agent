@@ -38,7 +38,7 @@ from ..core.config import AgentMode
 from .security import SECURITY_HEADERS, SecurityManager, Session
 from .state import Runtime
 
-API_VERSION = "1.3.0"
+API_VERSION = "1.4.0"
 
 
 class LoginRequest(BaseModel):
@@ -282,6 +282,18 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
             return session
         return dep
 
+    # -- liveness (unauthenticated) ------------------------------------------ #
+
+    @app.get("/health", include_in_schema=False)
+    async def process_health():
+        """Is the process serving? Nothing about the account, so no session.
+
+        The container healthcheck and the installer's readiness wait need a
+        200 without credentials; /api/health stays authenticated because it
+        reports the account.
+        """
+        return {"status": "ok", "version": API_VERSION}
+
     # -- auth ---------------------------------------------------------------- #
 
     @app.post("/api/auth/login")
@@ -419,6 +431,25 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         out["live_trading_allowed"] = allowed
         out["live_trading_reason"] = why
         return out
+
+    @app.get("/api/research/latest")
+    async def latest_research(session: Session = Depends(current_session)):
+        """The newest verdict, and whether it still describes what is running."""
+        from ..research.verdicts import config_fingerprint
+        rows = runtime.verdicts.list(limit=1)
+        if not rows:
+            return {"verdict": None}
+        record = runtime.verdicts.get(rows[0]["run_id"])
+        if record is None:
+            return {"verdict": None}
+        verdict = json.loads(record["payload"])
+        allocation = next((a for a in runtime.agent.config.strategies
+                           if a.name == record["strategy"]), None)
+        current = bool(allocation and record.get("config_hash") == config_fingerprint(
+            allocation.instruments, allocation.params, allocation.timeframe,
+            runtime_config=runtime.agent.config))
+        verdict["current_config"] = current
+        return {"verdict": verdict}
 
     @app.get("/api/verdicts")
     async def get_verdicts(strategy: Optional[str] = None,
@@ -820,7 +851,18 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
     # -- live stream ---------------------------------------------------------- #
 
     @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
+    async def websocket_endpoint(websocket: WebSocket):
+        # The bearer token travels in the Sec-WebSocket-Protocol header, never
+        # in the URL: a query string lands in access logs, proxies and browser
+        # history, and a session token in any of those is a session for whoever
+        # reads them. Browsers cannot set arbitrary headers on a WebSocket, but
+        # they can offer subprotocols, so "auth.<token>" is the carrier.
+        offered = [v.strip() for v in
+                   websocket.headers.get("sec-websocket-protocol", "").split(",") if v.strip()]
+        token = next((v[5:] for v in offered if v.startswith("auth.")), "")
+        if "sentinel-v1" not in offered or not token:
+            await websocket.close(code=4401)
+            return
         session = security.verify_token(
             token, user_agent=websocket.headers.get("user-agent", ""),
             client_ip=websocket.client.host if websocket.client else "unknown")
@@ -833,7 +875,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         if runtime.subscriber_count() >= _MAX_WS_SUBSCRIBERS:
             await websocket.close(code=4429)
             return
-        await websocket.accept()
+        await websocket.accept(subprotocol="sentinel-v1")
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
