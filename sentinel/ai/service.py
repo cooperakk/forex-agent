@@ -341,6 +341,23 @@ class AIService:
         cfg = self.settings.provider(pid)
         key = self._key(pid)
         out: Dict[str, Any] = {"provider": pid, "ok": False}
+        if CATALOG[pid].kind == "typesafe":
+            try:
+                client = ProviderClient(cfg, key, post=self._post, get=self._get)
+                answers, usage, latency = client.system_one(
+                    {"text": "The central bank raised its policy rate by 25 basis points."},
+                    {"ping": {"type": "noul",
+                              "instructions": "Does this text describe a rate increase?"}},
+                    timeout=self.settings.timeout_sec)
+                out.update(ok=True, model=cfg.effective_model(), latency_ms=latency,
+                           reply=str(answers.get("ping"))[:80],
+                           models=client.list_models())
+                self._journal(pid, cfg.effective_model(), "test", True,
+                              result=AIResult("", pid, cfg.effective_model(), latency))
+            except (ProviderError, ValueError) as exc:
+                out["error"] = str(exc)
+                self._journal(pid, cfg.effective_model(), "test", False, error=str(exc))
+            return out
         try:
             client = ProviderClient(cfg, key, post=self._post, get=self._get)
             result = client.complete(
@@ -374,8 +391,12 @@ class AIService:
                 ok, why = False, str(exc)
             if not ok:
                 return False, f"the licence does not include AI features ({why})"
-        if not self.settings.chain():
+        chain = self.settings.chain()
+        if not chain:
             return False, "no AI provider is enabled"
+        if purpose != "news" and all(CATALOG[p].kind == "typesafe" for p in chain):
+            return False, ("the enabled providers answer typed questions only; this "
+                           "purpose needs a model that writes text")
         return True, ""
 
     def _over_budget(self) -> Optional[str]:
@@ -399,6 +420,8 @@ class AIService:
             self._journal("-", "-", purpose, False, error=budget)
             return None
         for pid in self.settings.chain():
+            if CATALOG[pid].kind == "typesafe":
+                continue            # answers questions, does not write text
             cfg = self.settings.provider(pid)
             key = self._key(pid)
             try:
@@ -413,6 +436,53 @@ class AIService:
             self._journal(pid, result.model, purpose, True, result=result, prompt=user)
             return result
         return None
+
+    def structured_news_provider(self) -> Optional[str]:
+        """The System One provider the news desk should use, if one leads.
+
+        Only when it comes FIRST among the enabled providers: the owner's
+        ordering decides, and a Jev key sitting behind a preferred text model
+        does not silently take over the news path.
+        """
+        chain = self.settings.chain()
+        if chain and CATALOG[chain[0]].kind == "typesafe":
+            return chain[0]
+        return None
+
+    def classify_news(self, article_id: str, headline: str, summary: str,
+                      currencies, *, training_cutoff: str = ""):
+        """An ``Extraction`` from a System One model, or None to use the text path."""
+        from .jev import build_questions, extraction_from_answers
+
+        pid = self.structured_news_provider()
+        if pid is None:
+            return None
+        ok, _why = self.available("news")
+        if not ok:
+            return None
+        budget = self._over_budget()
+        if budget:
+            self._journal("-", "-", "news", False, error=budget)
+            return None
+        cfg = self.settings.provider(pid)
+        state = {"source_text": {"headline": headline[:500], "summary": summary[:3000]},
+                 "currencies_the_source_covers": list(currencies or [])}
+        try:
+            client = ProviderClient(cfg, self._key(pid), post=self._post, get=self._get)
+            answers, usage, latency = client.system_one(
+                state, build_questions(), timeout=self.settings.timeout_sec)
+        except (ProviderError, ValueError) as exc:
+            self._journal(pid, cfg.effective_model(), "news", False, error=str(exc),
+                          prompt=headline)
+            return None
+        result = AIResult(text="", provider=pid, model=cfg.effective_model(),
+                          latency_ms=latency,
+                          input_tokens=int(usage.get("input_tokens", 0) or 0),
+                          output_tokens=int(usage.get("output_tokens", 0) or 0))
+        self._journal(pid, result.model, "news", True, result=result, prompt=headline)
+        return extraction_from_answers(article_id, headline, answers, model=result.model,
+                                       currencies=currencies, latency_ms=latency,
+                                       training_cutoff=training_cutoff)
 
     def caller(self, purpose: str) -> Callable[[str, str], str]:
         """A ``(system, user) -> text`` function for NewsExtractor and friends."""

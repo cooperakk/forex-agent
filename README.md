@@ -8,7 +8,7 @@
 *An autonomous FX trading agent built around capital preservation,
 statistical honesty, and a tamper-evident audit trail.*
 
-`Python 3.11+` · `FastAPI` · `React + TypeScript` · `1080 tests`
+`Python 3.11+` · `FastAPI` · `React + TypeScript` · `1088 tests`
 
 </div>
 
@@ -87,7 +87,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt   # runtime + test deps
 cd dashboard && npm ci && npm run build && cd ..
 
-.venv/bin/python -m pytest -q        # انتظار: 1078 passed (+2 platform-specific skips)
+.venv/bin/python -m pytest -q        # انتظار: 1086 passed (+2 platform-specific skips)
 
 cp .env.example .env && chmod 600 .env
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # SENTINEL_JWT_SECRET
@@ -211,8 +211,8 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the full list. In short:
   activation leases with revocation and seat limits
   (`scripts/license_server.py`), and native-compiled protected builds
   (`scripts/build_protected.py`). See [`docs/LICENSING.md`](docs/LICENSING.md).
-* **AI assistants** -- Claude, ChatGPT, Gemini, DeepSeek, Kimi or any
-  OpenAI-compatible endpoint, with sealed write-only keys, fallbacks and
+* **AI assistants** -- Claude, ChatGPT, Gemini, DeepSeek, Kimi, Jev (TypeSafe AI)
+  or any OpenAI-compatible endpoint, with sealed write-only keys, fallbacks and
   budgets. Used for official-news filtering (shrink/block only), a trade coach
   that explains every closed trade in Persian, and a daily brief. A model can
   never open or enlarge a position. See [`docs/AI-PROVIDERS.md`](docs/AI-PROVIDERS.md).
@@ -240,7 +240,7 @@ result and is left in place deliberately.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # runtime + test deps
 cd dashboard && npm ci && npm run build && cd ..
-.venv/bin/python -m pytest -q          # 1078 passed (+2 platform-specific skips)
+.venv/bin/python -m pytest -q          # 1086 passed (+2 platform-specific skips)
 cp .env.example .env && chmod 600 .env && $EDITOR .env
 set -a && . ./.env && set +a && .venv/bin/python scripts/serve.py
 ```
@@ -276,7 +276,7 @@ scripts/       serve · run_acceptance · run_paper_sim · manage_users ·
 deploy/        systemd units · nginx · backup ·
                scripts/ (install, update, restore, healthcheck, uninstall)
 docs/          architecture · security · acceptance protocol · deployment
-tests/         1080 tests, including a regression for every audit finding
+tests/         1088 tests, including a regression for every audit finding
 ```
 
 ### Commands

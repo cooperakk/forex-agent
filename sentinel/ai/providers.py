@@ -10,8 +10,17 @@ openai      ChatGPT (OpenAI)        Chat Completions (``/v1/chat/completions``)
 gemini      Gemini (Google)         ``models/{model}:generateContent``
 deepseek    DeepSeek                OpenAI-compatible
 kimi        Kimi (Moonshot AI)      OpenAI-compatible
+jev         Jev (TypeSafe AI)       System One (``/v1/systemone``): typed
+                                    answers with probabilities, no text
 custom      any compatible server   OpenAI-compatible, owner-supplied https URL
 ==========  ======================  =============================================
+
+Jev is a different kind of model: it does not write text. It answers typed
+questions -- pick one of these options, is this condition true -- with a
+probability for each answer. That is exactly the shape of news
+classification, so the news desk uses it there (see ``sentinel/ai/jev.py``);
+the coach and the brief, which must write Persian prose, skip it and use the
+next text model in the chain.
 
 What a provider is allowed to be, and what it is not
 ----------------------------------------------------
@@ -90,6 +99,13 @@ CATALOG: Dict[str, ProviderSpec] = {
         "https://api.moonshot.ai/v1", "kimi-k2-turbo-preview", "sk-",
         "https://platform.moonshot.ai/console/api-keys",
         "برای حساب‌های چینی، نشانی را به api.moonshot.cn تغییر دهید (گزینهٔ سفارشی)."),
+    "jev": ProviderSpec(
+        "jev", "Jev (TypeSafe AI)", "جِو (TypeSafe AI)", "typesafe",
+        "https://api.typesafe.ai/v1", "jev-latest", "",
+        "",
+        "مدل تصمیم‌گیر سریع و بسیار ارزان: متن نمی‌نویسد، به پرسش‌های چندگزینه‌ای "
+        "با احتمال جواب می‌دهد. برای طبقه‌بندی اخبار استفاده می‌شود؛ مربی و گزارش "
+        "روزانه از مدل متنی بعدی در صف استفاده می‌کنند. کلید را از کنسول TypeSafe بگیرید."),
     "custom": ProviderSpec(
         "custom", "Custom (OpenAI-compatible)", "سرویس سفارشی (سازگار با OpenAI)",
         "openai", "", "", "",
@@ -269,9 +285,54 @@ class ProviderClient:
 
     # -- the calls ------------------------------------------------------------ #
 
+    @property
+    def writes_text(self) -> bool:
+        """False for System One models, which answer questions instead."""
+        return self.config.spec().kind != "typesafe"
+
+    def system_one(self, state: Dict[str, Any], questions: Dict[str, Dict[str, Any]],
+                   *, timeout: float = 20.0) -> tuple:
+        """(answers, usage, latency_ms) from a System One model (Jev).
+
+        ``questions`` maps an id to ``{"type": "choice"|"noul"|"score",
+        "instructions": ..., "criteria": {...}}``. Ids stay in code; the model
+        only sees each question's own text, so each must be self-contained.
+        """
+        import json as _json
+        if self.config.spec().kind != "typesafe":
+            raise ProviderError(f"{self.config.spec().label} is not a System One model")
+        url = f"{self.base_url}/systemone"
+        headers = {"authorization": f"Bearer {self.api_key}",
+                   "content-type": "application/json"}
+        body = {"model": self.model, "state": state, "questions": questions}
+        started = time.monotonic()
+        try:
+            status, text = self._post(url, headers=headers, json_body=body, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - network failures are data
+            raise ProviderError(_redact(f"{type(exc).__name__}: {exc}", self.api_key)) \
+                from None
+        latency = (time.monotonic() - started) * 1000.0
+        if status in (301, 302, 303, 307, 308):
+            raise ProviderError("the provider answered with a redirect, which is not "
+                                "followed (it would carry the API key elsewhere)")
+        if status >= 400:
+            raise ProviderError(_redact(f"HTTP {status}: {text}", self.api_key))
+        try:
+            data = _json.loads(text)
+        except ValueError:
+            raise ProviderError("the provider did not answer with JSON") from None
+        answers = data.get("answers") if isinstance(data, dict) else None
+        if not isinstance(answers, dict):
+            raise ProviderError("the System One answer has no `answers` object")
+        usage = data.get("usage") or {}
+        return answers, usage, round(latency, 1)
+
     def complete(self, system: str, user: str, *, max_tokens: int = 800,
                  json_mode: bool = False, timeout: float = 20.0) -> AIResult:
         import json as _json
+        if not self.writes_text:
+            raise ProviderError(f"{self.config.spec().label} answers typed questions and "
+                                "does not write text")
         url, headers, body = self._request(system, user, max_tokens, json_mode)
         started = time.monotonic()
         try:
@@ -300,6 +361,10 @@ class ProviderClient:
     def list_models(self, *, timeout: float = 15.0) -> List[str]:
         import json as _json
         kind = self.config.spec().kind
+        if kind == "typesafe":
+            # No model-list endpoint is assumed; "jev-latest" follows the
+            # vendor's current model.
+            return sorted({self.model, "jev-latest"})
         if kind == "anthropic":
             url = f"{self.base_url}/v1/models"
             headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}

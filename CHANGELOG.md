@@ -60,8 +60,9 @@ Every defect below has a regression test that fails against 1.4.0.
 
 ### Added
 
-- **AI assistants** (`sentinel/ai`): Claude, ChatGPT, Gemini, DeepSeek, Kimi and
-  any OpenAI-compatible endpoint; sealed write-only keys; fallback chain;
+- **AI assistants** (`sentinel/ai`): Claude, ChatGPT, Gemini, DeepSeek, Kimi,
+  **Jev (TypeSafe AI System One, used for probabilistic news classification)**
+  and any OpenAI-compatible endpoint; sealed write-only keys; fallback chain;
   budgets; journalled calls. Used for official-news extraction (shrink/block
   only), the **trade coach** (plain-Persian review of each closed trade), and a
   **daily brief**. See `docs/AI-PROVIDERS.md`.
@@ -78,7 +79,7 @@ Every defect below has a regression test that fails against 1.4.0.
 - **Linux** `check-environment.sh`; broader backup coverage;
   `scripts/backup_state.py` (portable backup).
 
-Tests: 961 -> 1078 passing (+2 platform-specific skips).
+Tests: 961 -> 1086 passing (+2 platform-specific skips).
 
 ## 1.4.0 and earlier
 

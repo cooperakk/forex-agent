@@ -117,8 +117,15 @@ class NewsDesk:
                        and (a.published_ns or now_ns) >= horizon
                        and not self.ai.store.has_extraction(a.article_id)]
         for article in pending[: self.max_extractions]:
-            ex = extractor.extract(article.article_id, article.title, article.summary,
-                                   published_ns=article.published_ns)
+            # A System One model (Jev) answers typed questions with
+            # probabilities when the owner put it first; otherwise, or if it
+            # fails, the text model writes a schema-checked extraction.
+            ex = self.ai.classify_news(article.article_id, article.title, article.summary,
+                                       article.currencies,
+                                       training_cutoff=self.training_cutoff)
+            if ex is None:
+                ex = extractor.extract(article.article_id, article.title, article.summary,
+                                       published_ns=article.published_ns)
             # The source already tells us which currency it moves. A model that
             # lists none, or lists an unrelated one, is corrected towards the
             # source, never away from it.

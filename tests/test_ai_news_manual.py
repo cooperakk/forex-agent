@@ -568,3 +568,118 @@ class TestApi:
         r = api["client"].post("/api/ai/provider", headers=api["vh"],
                                json={"provider": "openai", "enabled": True})
         assert r.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# Jev (TypeSafe AI System One)
+# --------------------------------------------------------------------------- #
+
+
+class JevWire:
+    """A fake System One endpoint: answers every question it is asked."""
+
+    def __init__(self, *, favour=None, noul=None, label_keys=False, fail=False):
+        self.favour = favour or {"event_type": "monetary_policy", "direction": "hawkish"}
+        self.noul = noul or {}
+        self.label_keys = label_keys
+        self.fail = fail
+        self.requests = []
+
+    def post(self, url, *, headers, json_body, timeout):
+        self.requests.append({"url": url, "headers": headers, "body": json_body})
+        if self.fail:
+            return 503, '{"detail": "overloaded"}'
+        answers = {}
+        for qid, q in json_body["questions"].items():
+            if q["type"] == "noul":
+                answers[qid] = {"type": "noul", "noul": self.noul.get(qid, 0.05)}
+                continue
+            base = qid.replace("_rev", "")
+            keys = list(q["criteria"])
+            want = self.favour[base]
+            probs = {k: (0.8 if k == want else 0.2 / (len(keys) - 1)) for k in keys}
+            if self.label_keys:
+                probs = {q["criteria"][k]: v for k, v in probs.items()}
+            answers[qid] = {"type": "choice", "choice": want, "confidence": 0.8,
+                            "probabilities": probs}
+        return 200, json.dumps({"model": "jev-latest", "answers": answers,
+                                "usage": {"input_tokens": 120, "output_tokens": 6}})
+
+
+def _jev_ai(tmp_path, wire, *, also_text=None):
+    audit = AuditLog(tmp_path / "audit.jsonl", fsync_every_record=False)
+    text_wire = also_text or Wire()
+
+    def post(url, **kw):
+        return (wire.post if "typesafe" in url else text_wire.post)(url, **kw)
+    ai = AIService(tmp_path, audit, transport_post=post, transport_get=Wire().get)
+    ai.save_provider("jev", enabled=True, api_key="ts-test-key-0123456789")
+    if also_text is not None:
+        ai.save_provider("openai", enabled=True, api_key=KEY)
+        ai.save_settings(primary="jev", fallbacks=["openai"],
+                         purposes={"news": True, "coach": True, "brief": True},
+                         max_calls_per_hour=100, max_calls_per_day=100)
+    return ai
+
+
+class TestJev:
+    def test_the_request_is_a_system_one_call(self, tmp_path):
+        wire = JevWire()
+        ai = _jev_ai(tmp_path, wire)
+        ex = ai.classify_news("fed:1", "Federal Reserve raises rates", "", ["USD"])
+        req = wire.requests[0]
+        assert req["url"] == "https://api.typesafe.ai/v1/systemone"
+        assert req["headers"]["authorization"] == "Bearer ts-test-key-0123456789"
+        body = req["body"]
+        assert body["model"] == "jev-latest"
+        fwd = list(body["questions"]["event_type"]["criteria"])
+        rev = list(body["questions"]["event_type_rev"]["criteria"])
+        assert rev == fwd[::-1], "each choice is asked in both orders to cancel position bias"
+        assert body["questions"]["contradicts_prior"]["type"] == "noul"
+        assert ex.event_type == "monetary_policy" and ex.direction_claim == "hawkish"
+        assert ex.valid and ex.model == "jev:jev-latest"
+        assert ex.evidence_quotes == ["Federal Reserve raises rates"]
+
+    def test_answers_keyed_by_label_are_mapped_back_to_keys(self, tmp_path):
+        ai = _jev_ai(tmp_path, JevWire(label_keys=True, favour={"event_type": "inflation",
+                                                                "direction": "dovish"}))
+        ex = ai.classify_news("x:1", "CPI fell", "", ["EUR"])
+        assert ex.event_type == "inflation" and ex.direction_claim == "dovish"
+
+    @pytest.mark.parametrize("p,blocks", [(0.70, False), (0.80, True)])
+    def test_a_contradiction_needs_strong_evidence(self, tmp_path, p, blocks):
+        ai = _jev_ai(tmp_path, JevWire(noul={"contradicts_prior": p}))
+        ex = ai.classify_news("x:1", "Bank reverses guidance", "", ["GBP"])
+        assert ex.contradicts_prior is blocks
+
+    def test_the_desk_prefers_jev_and_falls_back_to_a_text_model(self, tmp_path):
+        answer = {"event_type": "monetary_policy", "currencies": ["USD"],
+                  "direction_claim": "neutral", "is_scheduled": True, "is_revision": False,
+                  "is_correction": False, "contradicts_prior": False, "numeric_values": [],
+                  "evidence_quotes": ["Federal Reserve issues FOMC statement"],
+                  "confidence": 0.8, "novelty": "new"}
+        text = Wire([_openai(json.dumps(answer))])
+        ai = _jev_ai(tmp_path, JevWire(fail=True), also_text=text)
+        desk = NewsDesk(None, ai=ai, fetch=lambda url, t: RSS, feeds=(FED,))
+        desk.refresh_feeds(NOW_NS)
+        [ex] = desk.recent_extractions(NOW_NS)
+        assert ex.model != "jev:jev-latest", "Jev failed, the text model answered"
+        assert text.requests, "the fallback was used"
+
+    def test_jev_never_writes_the_coach_or_the_brief(self, tmp_path):
+        ai = _jev_ai(tmp_path, JevWire())
+        ok, why = ai.available("coach")
+        assert ok is False and "writes text" in why
+        assert ai.complete("brief", "s", "u") is None
+        assert ai.available("news")[0] is True
+
+    def test_a_jev_connection_test(self, tmp_path):
+        ai = _jev_ai(tmp_path, JevWire(noul={"ping": 0.97}))
+        report = ai.test_provider("jev")
+        assert report["ok"] is True and "jev-latest" in report["models"]
+
+    def test_a_text_model_first_keeps_the_text_path(self, tmp_path):
+        ai = _jev_ai(tmp_path, JevWire(), also_text=Wire())
+        ai.save_settings(primary="openai", fallbacks=["jev"], purposes={"news": True},
+                         max_calls_per_hour=10, max_calls_per_day=10)
+        assert ai.structured_news_provider() is None

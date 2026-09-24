@@ -26,7 +26,28 @@ never treated as evidence.
 | `gemini` | Gemini (Google) | generateContent | `gemini-2.5-flash` | aistudio.google.com/app/apikey |
 | `deepseek` | DeepSeek | OpenAI-compatible | `deepseek-chat` | platform.deepseek.com/api_keys |
 | `kimi` | Kimi (Moonshot AI) | OpenAI-compatible | `kimi-k2-turbo-preview` | platform.moonshot.ai (use `https://api.moonshot.cn/v1` for China accounts) |
+| `jev` | Jev (TypeSafe AI) | System One (`POST /v1/systemone`) | `jev-latest` | the TypeSafe console |
 | `custom` | Any OpenAI-compatible server | OpenAI-compatible | -- | e.g. Qwen, Grok, OpenRouter, or a local model at `http://127.0.0.1:.../v1` |
+
+### Jev is used differently
+
+Jev (TypeSafe AI, released September 2026) is a "System One" model: it does not
+write text, it answers typed questions -- pick one option, or the probability a
+condition holds -- with a probability for every answer. That is the shape of
+news classification, so when Jev is **first** in the provider order the news
+desk asks it:
+
+* two Choices over the extraction schema's own enums (event type, policy
+  direction), each asked in **both option orders** in the same request and
+  averaged, which cancels the model's preference for options listed first;
+* four Nouls: correction, revision, contradiction, scheduled.
+
+A contradiction is flagged only at probability >= 0.75 (a correction at 0.6),
+and the desk still honours a contradiction block only while fresh and
+confident. Nothing is generated, so nothing can be fabricated; the headline it
+classified is recorded as the evidence. If Jev fails, the next text model in
+the chain produces the extraction instead. The coach and the brief need prose,
+so they always skip Jev.
 
 Model names change often. After saving a key, press **Test connection** on the
 dashboard: it makes a tiny call and lists the models the provider actually
