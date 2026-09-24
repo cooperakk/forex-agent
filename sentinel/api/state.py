@@ -519,6 +519,12 @@ class Runtime:
                 "supports_transaction_stream": caps.supports_transaction_stream,
                 "degradations": caps.degradation_report(),
             },
+            # Strategies the performance guard has suspended, with the reason.
+            # They open nothing until the owner releases them, so an operator
+            # who cannot see this list sees a strategy that has simply gone
+            # quiet.
+            "guard_suspended": agent.guard_suspended,
+            "entries_permitted": self._entries_permitted(),
             "unresolved_orders": len(agent.oms.unresolved),
             "quarantined": sorted(agent.oms.quarantined),
             "advisory_pending": len(agent.pending_advice()),
@@ -526,6 +532,13 @@ class Runtime:
             "config_version": cfg.version,
             "errors": self.errors[-5:],
         }
+
+    def _entries_permitted(self) -> Dict[str, Any]:
+        try:
+            allowed, why = self.agent.entry_permission()
+        except Exception as exc:  # noqa: BLE001
+            allowed, why = False, str(exc)
+        return {"allowed": bool(allowed), "reason": why}
 
     def positions(self) -> List[dict]:
         out: List[dict] = []
@@ -737,6 +750,7 @@ class Runtime:
                 failed.append({"instrument": pos.instrument,
                                "error": res.reject_reason or res.state.value})
         remaining = [p.instrument for p in self.agent.broker.positions()]
+        self._forget_closed(remaining)
         self.agent.audit.append(EventType.POSITION_CLOSE,
                                 {"action": "flatten_all", "closed": closed,
                                  "failed": failed, "still_open": remaining}, actor=by)
@@ -762,7 +776,33 @@ class Runtime:
             self.agent.audit.append(EventType.POSITION_CLOSE,
                                     {"instrument": instrument, "lots": lots,
                                      "state": res.state.value}, actor=by)
+            if res.state in (OrderState.FILLED, OrderState.PARTIAL):
+                try:
+                    remaining = [p.instrument for p in self.agent.broker.positions()]
+                except Exception:  # noqa: BLE001 - the next reconcile will settle it
+                    remaining = None
+                if remaining is not None:
+                    self._forget_closed(remaining)
         return {"state": res.state.value, "reason": res.reject_reason}
+
+    def _forget_closed(self, still_open: List[str]) -> None:
+        """Drop the agent's metadata for positions a human just closed.
+
+        Left in place, the next reconciliation compared the agent's book --
+        still holding the closed position -- against the venue and journalled
+        a `phantom` mismatch for every manual close, burying real mismatches
+        in noise an operator learns to ignore.
+        """
+        live = set(still_open)
+        meta = getattr(self.agent, "_position_meta", None)
+        if not isinstance(meta, dict):
+            return
+        for sym in [k for k in meta if k not in live]:
+            meta.pop(sym, None)
+        try:
+            self.agent._save_state()
+        except Exception:  # noqa: BLE001
+            pass
 
     # Fields that a config write may never change, because each has its own
     # endpoint with its own guard. Routing them through the generic config patch
@@ -802,6 +842,20 @@ class Runtime:
         ("security", "allowed_origins"): "CORS is fixed at startup",
         ("security", "session_ttl_minutes"): "session lifetime is fixed at startup",
         ("security", "dashboard_read_only_default"): "fixed at startup",
+        # Filesystem locations that the process LOADS or WRITES. Each is a
+        # restart-only, server-side setting, because through the dashboard
+        # each one is an escalation from "owner of the console" to "code
+        # execution on the server": the meta model is a joblib (pickle) file
+        # that is unpickled at startup, the plugin directory is imported as
+        # Python, and the data paths decide where SQLite and backups write.
+        ("agent", "meta_model_path"): "the meta-label model is unpickled at startup; "
+                                      "set it in the config file on the server",
+        ("ops", "strategy_plugin_dir"): "plugin files are imported as Python code; set "
+                                        "the directory on the server",
+        ("ops", "backup_dir"): "the backup location is fixed at startup",
+        ("ops", "group_ledger_dir"): "the cross-account ledger location is fixed at "
+                                     "startup",
+        ("data", "store_path"): "the market-data store location is fixed at startup",
     }
 
     def _guard_privileged_fields(self, current: SentinelConfig,

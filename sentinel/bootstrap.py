@@ -386,7 +386,11 @@ def build_runtime(config_path: str | Path = "var/config.json",
                       before_min=config.risk.block_minutes_before_high_impact,
                       after_min=config.risk.block_minutes_after_high_impact)
 
-    agent = Agent(config, broker, feed, audit, memory, proposals=proposals, news=news)
+    # The licence is asked again before every NEW live entry, not only here at
+    # boot: a licence that expires while the service stays up must stop new
+    # live risk the moment it lapses (open positions stay managed).
+    agent = Agent(config, broker, feed, audit, memory, proposals=proposals, news=news,
+                  entry_gate=gate.may_trade_live)
     runtime = Runtime(agent, config_path, verdicts=verdicts, licence=gate)
 
     jwt_secret = os.environ.get("SENTINEL_JWT_SECRET")

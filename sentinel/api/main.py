@@ -38,7 +38,7 @@ from ..core.config import AgentMode
 from .security import SECURITY_HEADERS, SecurityManager, Session
 from .state import Runtime
 
-API_VERSION = "1.4.0"
+API_VERSION = "1.5.0"
 
 
 class LoginRequest(BaseModel):
@@ -66,6 +66,10 @@ class ConfigPatch(BaseModel):
 class AdviceAction(BaseModel):
     client_order_id: str
     reason: str = ""
+
+
+class GuardRelease(BaseModel):
+    strategy: str = Field(min_length=1, max_length=64)
 
 
 class ProposalReview(BaseModel):
@@ -218,9 +222,17 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
             return response
 
         length = request.headers.get("content-length")
-        if length and int(length) > 256_000:
-            return _stamp(JSONResponse({"detail": "request body too large"},
-                                       status_code=413))
+        if length:
+            try:
+                too_big = int(length) > 256_000 or int(length) < 0
+            except ValueError:
+                # int() on a malformed header raised OUTSIDE the try below, so
+                # the request escaped every handler as an unstamped 500.
+                return _stamp(JSONResponse({"detail": "malformed content-length"},
+                                           status_code=400))
+            if too_big:
+                return _stamp(JSONResponse({"detail": "request body too large"},
+                                           status_code=413))
         try:
             response = await call_next(request)
         except HTTPException:
@@ -246,6 +258,31 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
             # Never leak a stack trace to a client that may be hostile.
             return _stamp(JSONResponse({"detail": "internal error"}, status_code=500))
         return _stamp(response)
+
+    # -- audit verification cache ------------------------------------------ #
+    #
+    # Verifying the chain re-hashes every record ever written. It ran on EVERY
+    # /api/audit call, which the dashboard polls, so a months-old journal made
+    # each poll a full-file SHA-256 walk that any viewer could trigger 120
+    # times a minute. The result is reused while the file is byte-for-byte the
+    # same size and modification time and the head sequence has not moved; any
+    # edit, truncation or append changes one of the three and forces a walk.
+    _verify_cache: Dict[str, Any] = {"key": None, "result": None}
+    _verify_lock = __import__("threading").Lock()
+
+    def _verified_chain(audit):
+        try:
+            st = os.stat(audit.path)
+            key = (int(st.st_size), int(st.st_mtime_ns), int(audit.seq))
+        except (OSError, AttributeError, TypeError):
+            return audit.verify()
+        with _verify_lock:
+            if _verify_cache["key"] == key and _verify_cache["result"] is not None:
+                return _verify_cache["result"]
+        result = audit.verify()
+        with _verify_lock:
+            _verify_cache["key"], _verify_cache["result"] = key, result
+        return result
 
     # -- dependencies ------------------------------------------------------- #
 
@@ -297,7 +334,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
     # -- auth ---------------------------------------------------------------- #
 
     @app.post("/api/auth/login")
-    async def login(body: LoginRequest, request: Request):
+    def login(body: LoginRequest, request: Request):
         ip = client_ip(request)
         if not security.check_rate(f"login:{ip}", 10):
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many attempts")
@@ -312,11 +349,11 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                 "requires_totp_for_writes": True}
 
     @app.post("/api/auth/logout")
-    async def logout(session: Session = Depends(current_session)):
+    def logout(session: Session = Depends(current_session)):
         return {"ok": security.logout(session.token_id)}
 
     @app.get("/api/auth/me")
-    async def me(session: Session = Depends(current_session)):
+    def me(session: Session = Depends(current_session)):
         user = security.get_user(session.username)
         return {"username": session.username, "role": session.role,
                 "can_write": bool(user and user.can_write),
@@ -326,7 +363,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
     # -- read ---------------------------------------------------------------- #
 
     @app.get("/api/status")
-    async def get_status(session: Session = Depends(current_session)):
+    def get_status(session: Session = Depends(current_session)):
         data = runtime.status()
         data["api_version"] = API_VERSION
         if app.state.public_bind:
@@ -337,43 +374,43 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return data
 
     @app.get("/api/positions")
-    async def get_positions(session: Session = Depends(current_session)):
+    def get_positions(session: Session = Depends(current_session)):
         return {"positions": runtime.positions()}
 
     @app.get("/api/trades")
-    async def get_trades(limit: int = Query(200, ge=1, le=2000),
+    def get_trades(limit: int = Query(200, ge=1, le=2000),
                          session: Session = Depends(current_session)):
         return {"trades": runtime.trades(limit)}
 
     @app.get("/api/performance")
-    async def get_performance(session: Session = Depends(current_session)):
+    def get_performance(session: Session = Depends(current_session)):
         return runtime.performance()
 
     @app.get("/api/equity")
-    async def get_equity(limit: int = Query(2000, ge=10, le=20000),
+    def get_equity(limit: int = Query(2000, ge=10, le=20000),
                          session: Session = Depends(current_session)):
         return {"points": runtime.equity_series(limit)}
 
     @app.get("/api/decisions")
-    async def get_decisions(limit: int = Query(200, ge=1, le=2000),
+    def get_decisions(limit: int = Query(200, ge=1, le=2000),
                             action: Optional[str] = None,
                             session: Session = Depends(current_session)):
         return {"decisions": runtime.decisions(limit, action)}
 
     @app.get("/api/risk")
-    async def get_risk(session: Session = Depends(current_session)):
+    def get_risk(session: Session = Depends(current_session)):
         return runtime.risk_view()
 
     @app.get("/api/execution")
-    async def get_execution(session: Session = Depends(current_session)):
+    def get_execution(session: Session = Depends(current_session)):
         return runtime.execution_quality()
 
     @app.get("/api/config")
-    async def get_config(session: Session = Depends(current_session)):
+    def get_config(session: Session = Depends(current_session)):
         return json.loads(runtime.agent.config.to_json())
 
     @app.get("/api/strategies")
-    async def get_strategies(session: Session = Depends(current_session)):
+    def get_strategies(session: Session = Depends(current_session)):
         from ..strategy.registry import describe_all, families, load_report
         allocs = {a.name: a.model_dump(mode="json") for a in runtime.agent.config.strategies}
         # `loading` carries the plugin report. A user strategy that failed to
@@ -383,37 +420,52 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                 "families": families(), "loading": load_report()}
 
     @app.get("/api/advice")
-    async def get_advice(session: Session = Depends(current_session)):
+    def get_advice(session: Session = Depends(current_session)):
         return {"pending": [d.to_dict() for d in runtime.agent.pending_advice()]}
 
     @app.get("/api/proposals")
-    async def get_proposals(session: Session = Depends(current_session)):
+    def get_proposals(session: Session = Depends(current_session)):
         return {"proposals": [p.to_dict() for p in runtime.agent.proposals.all()]}
 
     @app.get("/api/lessons")
-    async def get_lessons(include_superseded: bool = False,
+    def get_lessons(include_superseded: bool = False,
                           session: Session = Depends(current_session)):
         return {"lessons": [l.to_dict()
                             for l in runtime.agent.memory.all_lessons(include_superseded)]}
 
     @app.get("/api/autopsies")
-    async def get_autopsies(strategy: Optional[str] = None,
+    def get_autopsies(strategy: Optional[str] = None,
                             limit: int = Query(200, ge=1, le=2000),
                             session: Session = Depends(current_session)):
         return {"autopsies": runtime.agent.memory.autopsies(strategy, limit)}
 
     @app.get("/api/audit")
-    async def get_audit(since_seq: int = Query(0, ge=0),
-                        limit: int = Query(200, ge=1, le=2000),
-                        event: Optional[str] = None,
-                        session: Session = Depends(current_session)):
-        records = runtime.agent.audit.read(since_seq=since_seq, event=event, limit=limit)
-        ok, bad_seq, msg = runtime.agent.audit.verify()
+    def get_audit(since_seq: int = Query(0, ge=0),
+                  limit: int = Query(200, ge=1, le=2000),
+                  event: Optional[str] = None,
+                  tail: bool = Query(True),
+                  session: Session = Depends(current_session)):
+        audit = runtime.agent.audit
+        if since_seq == 0 and tail:
+            # The NEWEST records. Reading forward from seq 0 returned the first
+            # `limit` records ever written, so after the first busy hour the
+            # dashboard's journal showed nothing but the boot sequence -- the
+            # most recent halt, veto or failed login was never on screen.
+            from collections import deque as _deque
+            window: _deque = _deque(maxlen=limit)
+            for rec in audit.iter_records():
+                if event and rec.get("event") != event:
+                    continue
+                window.append(rec)
+            records = list(window)
+        else:
+            records = audit.read(since_seq=since_seq, event=event, limit=limit)
+        ok, bad_seq, msg = _verified_chain(audit)
         return {"records": records, "chain_valid": ok, "first_bad_seq": bad_seq,
-                "message": msg, "head_seq": runtime.agent.audit.seq}
+                "message": msg, "head_seq": audit.seq}
 
     @app.get("/api/licence")
-    async def get_licence(session: Session = Depends(current_session)):
+    def get_licence(session: Session = Depends(current_session)):
         """What the licence permits, and what is wrong with it if anything.
 
         Readable by any authenticated role: an operator who cannot see why the
@@ -433,7 +485,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return out
 
     @app.get("/api/research/latest")
-    async def latest_research(session: Session = Depends(current_session)):
+    def latest_research(session: Session = Depends(current_session)):
         """The newest verdict, and whether it still describes what is running."""
         from ..research.verdicts import config_fingerprint
         rows = runtime.verdicts.list(limit=1)
@@ -452,18 +504,18 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return {"verdict": verdict}
 
     @app.get("/api/verdicts")
-    async def get_verdicts(strategy: Optional[str] = None,
+    def get_verdicts(strategy: Optional[str] = None,
                            session: Session = Depends(current_session)):
         return {"verdicts": runtime.verdicts.list(strategy)}
 
     @app.get("/api/health")
-    async def get_health(session: Session = Depends(current_session)):
+    def get_health(session: Session = Depends(current_session)):
         snap = runtime.agent.health.snapshot()
         return {**snap.to_dict(),
                 "outage_distribution": runtime.agent.health.outage_distribution()}
 
     @app.get("/api/cycles")
-    async def get_cycles(limit: int = Query(50, ge=1, le=500),
+    def get_cycles(limit: int = Query(50, ge=1, le=500),
                          session: Session = Depends(current_session)):
         return {"cycles": runtime.cycle_history[-limit:][::-1]}
 
@@ -473,7 +525,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
     # release cancels a stop the watchdog may have engaged. Both are wider levers
     # than a risk-limit edit, so both take the same owner-only gate.
     @app.post("/api/control/mode")
-    async def set_mode(body: ModeRequest,
+    def set_mode(body: ModeRequest,
                        session: Session = Depends(
                            require_write("set_mode", requires_owner=True))):
         try:
@@ -486,37 +538,55 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
 
     @app.post("/api/control/kill")
-    async def engage_kill(body: ReasonRequest,
+    def engage_kill(body: ReasonRequest,
                           session: Session = Depends(require_write("engage_kill"))):
         return runtime.engage_kill(body.reason or "engaged from the dashboard",
                                    session.username)
 
     @app.post("/api/control/kill/release")
-    async def release_kill(session: Session = Depends(
+    def release_kill(session: Session = Depends(
             require_write("release_kill", requires_owner=True))):
         return runtime.release_kill(session.username)
 
     @app.post("/api/control/halt")
-    async def halt(body: ReasonRequest,
+    def halt(body: ReasonRequest,
                    session: Session = Depends(require_write("halt"))):
         return runtime.halt(body.reason or "manual", session.username)
 
     @app.post("/api/control/resume")
-    async def resume(session: Session = Depends(
+    def resume(session: Session = Depends(
             require_write("resume", requires_owner=True))):
         return runtime.resume(session.username)
 
+    @app.post("/api/control/release-guard")
+    def release_guard(body: GuardRelease,
+                      session: Session = Depends(
+                          require_write("release_guard", requires_owner=True))):
+        """Lift a performance-guard suspension. OWNER only.
+
+        The guard suspends a strategy whose realised R is demonstrably
+        negative. Before this endpoint existed the only way to lift it was a
+        Python shell on the server, so an owner who had reviewed the strategy
+        and wanted it back could not do so from the console that showed it.
+        """
+        with runtime._lock:
+            ok = runtime.agent.release_guard(body.strategy, session.username)
+        if not ok:
+            raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                "this strategy is not suspended by the performance guard")
+        return {"released": body.strategy}
+
     @app.post("/api/control/flatten")
-    async def flatten(session: Session = Depends(require_write("flatten_all"))):
+    def flatten(session: Session = Depends(require_write("flatten_all"))):
         return runtime.flatten_all(session.username)
 
     @app.post("/api/control/close")
-    async def close_position(body: ClosePositionRequest,
+    def close_position(body: ClosePositionRequest,
                              session: Session = Depends(require_write("close_position"))):
         return runtime.close_position(body.instrument, session.username, body.lots)
 
     @app.post("/api/config")
-    async def patch_config(body: ConfigPatch,
+    def patch_config(body: ConfigPatch,
                            session: Session = Depends(
                                require_write("update_config", requires_owner=True))):
         try:
@@ -541,7 +611,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:600])
 
     @app.post("/api/advice/accept")
-    async def accept_advice(body: AdviceAction,
+    def accept_advice(body: AdviceAction,
                             session: Session = Depends(require_write("accept_advice"))):
         # Under the runtime lock: accept_advice increments the same counters the
         # decision cycle does.
@@ -552,7 +622,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return d.to_dict()
 
     @app.post("/api/advice/reject")
-    async def reject_advice(body: AdviceAction,
+    def reject_advice(body: AdviceAction,
                             session: Session = Depends(require_write("reject_advice"))):
         with runtime._lock:
             ok = runtime.agent.reject_advice(body.client_order_id, session.username,
@@ -562,7 +632,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return {"rejected": True}
 
     @app.post("/api/proposals/review")
-    async def review_proposal(body: ProposalReview,
+    def review_proposal(body: ProposalReview,
                               session: Session = Depends(
                                   require_write("review_proposal", requires_owner=True))):
         try:
@@ -582,7 +652,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return p.to_dict()
 
     @app.post("/api/cycle")
-    async def force_cycle(session: Session = Depends(require_write("force_cycle"))):
+    def force_cycle(session: Session = Depends(require_write("force_cycle"))):
         return runtime.run_cycle().to_dict()
 
     # -- accounts ------------------------------------------------------------ #
@@ -592,7 +662,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
     # and which of them can move money. A viewer has no business seeing it.
 
     @app.get("/api/users")
-    async def list_users(session: Session = Depends(current_session)):
+    def list_users(session: Session = Depends(current_session)):
         user = security.get_user(session.username)
         if user is None or not user.can_change_risk:
             raise HTTPException(status.HTTP_403_FORBIDDEN,
@@ -605,7 +675,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                 "min_password_length": MIN_PASSWORD_LENGTH}
 
     @app.post("/api/users/create")
-    async def create_user(body: UserCreate,
+    def create_user(body: UserCreate,
                           session: Session = Depends(
                               require_write("create_user", requires_owner=True))):
         try:
@@ -626,7 +696,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                          "کد دومرحله‌ای را از نو بسازید.")}
 
     @app.post("/api/users/role")
-    async def change_role(body: UserRole,
+    def change_role(body: UserRole,
                           session: Session = Depends(
                               require_write("change_role", requires_owner=True))):
         try:
@@ -638,7 +708,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return {"username": body.username, "role": body.role}
 
     @app.post("/api/users/disable")
-    async def disable_user(body: UserFlag,
+    def disable_user(body: UserFlag,
                            session: Session = Depends(
                                require_write("disable_user", requires_owner=True))):
         try:
@@ -651,7 +721,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return {"username": body.username, "disabled": body.disabled}
 
     @app.post("/api/users/password")
-    async def reset_password(body: UserPassword,
+    def reset_password(body: UserPassword,
                              session: Session = Depends(
                                  require_write("reset_password", requires_owner=True))):
         try:
@@ -664,7 +734,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         return {"username": body.username, "changed": True}
 
     @app.post("/api/users/totp")
-    async def rotate_totp(body: UserName,
+    def rotate_totp(body: UserName,
                           session: Session = Depends(
                               require_write("rotate_totp", requires_owner=True))):
         uri = security.rotate_totp(body.username, actor=session.username)
@@ -675,7 +745,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                          "این کاربر بسته شد.")}
 
     @app.post("/api/users/delete")
-    async def delete_user(body: UserName,
+    def delete_user(body: UserName,
                           session: Session = Depends(
                               require_write("delete_user", requires_owner=True))):
         if body.username == session.username:
@@ -773,7 +843,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
     # -- licence -------------------------------------------------------------- #
 
     @app.get("/api/licence/fingerprint")
-    async def licence_fingerprint(session: Session = Depends(current_session)):
+    def licence_fingerprint(session: Session = Depends(current_session)):
         """What to send the vendor so a licence can be issued for this machine.
 
         Owner-only: the fingerprint identifies the installation, and while the
@@ -792,7 +862,7 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                          "مخصوص همین دستگاه صادر شود.")}
 
     @app.post("/api/licence/install")
-    async def install_licence(body: LicenceInstall,
+    def install_licence(body: LicenceInstall,
                               session: Session = Depends(
                                   require_write("install_licence",
                                                 requires_owner=True))):
@@ -901,7 +971,12 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
 
         runtime.subscribe(on_message)
         try:
-            await websocket.send_json({"type": "status", "data": runtime.status()})
+            # runtime.status() reads the account from the venue. On the event
+            # loop, a venue that accepts the connection and never answers
+            # froze every other request in the process -- including the kill
+            # switch -- so it runs in a worker thread like the HTTP handlers.
+            status_now = await asyncio.to_thread(runtime.status)
+            await websocket.send_json({"type": "status", "data": status_now})
             while True:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=15)
