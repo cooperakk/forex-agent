@@ -19,6 +19,7 @@ import {
 } from "../components/ui";
 import type { Provider } from "../api";
 import type { BrokerOverview, Connection, Discovered, ProbeReport } from "../types";
+import TerminalCard from "./TerminalCard";
 
 type Props = {
   provider: Provider;
@@ -89,6 +90,8 @@ export default function Brokers({ provider, write, readOnly, canAdminister }: Pr
           <span dir="ltr">{error}</span>
         </Banner>
       )}
+
+      <TerminalCard provider={provider} write={write} disabled={readOnly || !canAdminister} />
 
       {/* ---------- what is connected right now ---------- */}
       <Card title="بروکر فعلی"

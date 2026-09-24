@@ -9,6 +9,7 @@ import AIPage from "./pages/AIPage";
 import ReferencePage from "./pages/ReferencePage";
 import BrainPage from "./pages/BrainPage";
 import NotifyPage from "./pages/NotifyPage";
+import MacroPage from "./pages/MacroPage";
 import ManualTrade from "./pages/ManualTrade";
 import Audit from "./pages/Audit";
 import Brokers from "./pages/Brokers";
@@ -24,8 +25,8 @@ import Users from "./pages/Users";
 import type { Snapshot } from "./types";
 
 type Page = "overview" | "positions" | "manual" | "journal" | "risk" | "research" | "agent"
-  | "brain" | "ai" | "reference" | "notify" | "settings" | "brokers" | "users" | "licence"
-  | "audit" | "glossary";
+  | "brain" | "macro" | "ai" | "reference" | "notify" | "settings" | "brokers" | "users"
+  | "licence" | "audit" | "glossary";
 
 /* Nav labels are the first words a newcomer reads, so they say what the page
    shows rather than what the subsystem is called. */
@@ -38,6 +39,7 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "research", label: "آزمایش و اثبات", icon: "⬡" },
   { id: "agent", label: "تصمیم‌های ربات", icon: "◐" },
   { id: "brain", label: "مغز ربات (یادگیری)", icon: "✺" },
+  { id: "macro", label: "دلار و COT (بازار کلان)", icon: "$" },
   { id: "ai", label: "هوش مصنوعی و اخبار", icon: "✦" },
   { id: "reference", label: "قیمت مرجع (TradingView)", icon: "⚖" },
   { id: "notify", label: "اعلان‌ها (تلگرام و بله)", icon: "✉" },
@@ -246,6 +248,15 @@ export default function App() {
               </Banner>
             </div>
           )}
+          {s.terminal && s.terminal.applicable && s.terminal.state !== "ok"
+            && s.terminal.state !== "unknown" && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="neg" icon="⇄">
+                <strong>متاتریدر: {s.terminal.state_fa}.</strong> نگهبان در حال برگرداندن اتصال
+                است؛ تا آن موقع معاملهٔ تازه باز نمی‌شود. جزئیات در «بروکر و اتصال».
+              </Banner>
+            </div>
+          )}
           {s.cooldowns && Object.keys(s.cooldowns).length > 0 && (
             <div style={{ marginBottom: 16 }}>
               <Banner tone="warn" icon="😮‍💨">
@@ -283,6 +294,8 @@ export default function App() {
                                                   readOnly={readOnly}
                                                   canAdminister={canAdminister} />}
           {page === "brain" && <BrainPage provider={provider} write={write} readOnly={readOnly}
+                                          canAdminister={canAdminister} />}
+          {page === "macro" && <MacroPage provider={provider} write={write} readOnly={readOnly}
                                           canAdminister={canAdminister} />}
           {page === "notify" && <NotifyPage provider={provider} write={write} readOnly={readOnly}
                                             canAdminister={canAdminister} />}

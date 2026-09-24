@@ -51,6 +51,9 @@ class LabDeps:
     conversions: Callable[[], Dict[str, Decimal]]
     proposals: Optional[Callable[[], List[Any]]] = None
     model_dir: Optional[Path] = None
+    #: sentinel.data.macro.MacroDesk: the dollar index and COT, joined to each
+    #: training signal AS OF its own time, exactly as the live agent sees them.
+    macro: Any = None
 
 
 def _frames(bar_store, instruments: List[str], timeframe: str, limit: int
@@ -165,6 +168,7 @@ class ResearchLab:
                     s["strategy"] = alloc.name
                     s["label_end_ns"] = int(s.get("ts_ns") or 0) + \
                         int(s.get("horizon_bars") or 1) * tf_s * 1_000_000_000
+                    s["bar_ns"] = tf_s * 1_000_000_000
                     signal_logs.append(s)
             except Exception as exc:  # noqa: BLE001 - one broken strategy is reported
                 row["status"] = "error"
@@ -229,11 +233,33 @@ class ResearchLab:
             row["error"] = f"{type(exc).__name__}: {exc}"[:200]
         return row
 
+    def _join_macro(self, rows: List[Dict[str, Any]]) -> int:
+        """Add the macro features each row would have had live. Returns how many
+        rows received any; a missing desk or history leaves rows untouched."""
+        macro = self.deps.macro
+        if macro is None or not rows:
+            return 0
+        try:
+            dxy = macro.dxy_history(limit=50_000)   # every stored bar, not the live window
+        except Exception:  # noqa: BLE001
+            dxy = None
+        n = 0
+        for r in rows:
+            try:
+                extra = _macro_features(macro, r, dxy)
+            except Exception:  # noqa: BLE001 - one bad row is skipped
+                continue
+            if extra:
+                r["features"] = {**(r.get("features") or {}), **extra}
+                n += 1
+        return n
+
     def _train_meta(self, signal_logs: List[Dict[str, Any]], min_auc: float) -> Dict[str, Any]:
         from ..research.metalabel import fit_meta_gate
 
         rows = sorted([r for r in signal_logs if r.get("fwd_ret_h") is not None],
                       key=lambda r: r.get("ts_ns", 0))
+        macro_rows = self._join_macro(rows)
         if len(rows) < 250:
             return {"trained": False, "reason": f"only {len(rows)} labelled signals (need 250)"}
         cut = int(len(rows) * 0.6)
@@ -247,7 +273,7 @@ class ResearchLab:
         gate, fit_report = fit_meta_gate(train)
         out: Dict[str, Any] = {"trained": gate is not None, "fit": fit_report,
                                "n_train": len(train), "n_holdout": len(hold),
-                               "n_purged": n_purged}
+                               "n_purged": n_purged, "n_with_macro": macro_rows}
         if gate is None:
             out["reason"] = "the fit refused (see fit notes)"
             return out
@@ -285,6 +311,12 @@ class ResearchLab:
                 pass
             out.update(model_id=model_id, path=str(path), sha256=sha)
         return out
+
+
+def _macro_features(macro, row: Dict[str, Any], dxy) -> Dict[str, float]:
+    as_of = int(row.get("ts_ns") or 0) + int(row.get("bar_ns") or 3_600_000_000_000)
+    return macro.features(str(row.get("instrument") or ""), int(row.get("side_sign") or 0),
+                          as_of, dxy=dxy)
 
 
 def run_safely(lab: ResearchLab, **kw) -> Dict[str, Any]:

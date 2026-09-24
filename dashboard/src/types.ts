@@ -60,6 +60,7 @@ export interface Status {
   guard_suspended?: Record<string, string>;
   cooldowns?: Record<string, string>;
   day_pnl?: string | null;
+  terminal?: TerminalView | null;
   /** Whether NEW live risk may be opened right now, as far as the licence goes. */
   entries_permitted?: { allowed: boolean; reason: string };
 }
@@ -478,4 +479,40 @@ export interface NotifyChannel {
 export interface NotifyView {
   available: boolean; channels?: Record<"telegram" | "bale", NotifyChannel>;
   categories?: string[]; daily_hour_utc?: number; token_storage?: string; queued?: number;
+}
+
+/* Macro context: the dollar index and CFTC positioning (1.8.0). */
+export interface CotRow {
+  currency: string; code: string; weeks: number; report_date?: string; available_ns?: number;
+  net?: number; net_pct_oi?: number; index?: number; change?: number;
+  crowded_long: boolean; crowded_short: boolean;
+}
+
+export interface MacroConfig {
+  enabled: boolean; dxy_enabled: boolean; dxy_timeframe: string; dxy_history_bars: number;
+  dxy_headwind_enabled: boolean; dxy_headwind_score: number; dxy_headwind_multiplier: number;
+  cot_enabled: boolean; cot_refresh_hours: number; cot_lookback_weeks: number;
+  cot_min_weeks: number; cot_crowding_enabled: boolean; cot_extreme: number;
+  cot_crowding_multiplier: number;
+}
+
+export interface MacroView {
+  available: boolean; enabled?: boolean; config?: MacroConfig;
+  dxy?: { available: boolean; error: string; components_on_server: string[];
+          complete?: boolean; used?: string[]; missing?: string[]; notes?: string[];
+          timeframe?: string; last?: number; last_bar?: string; points?: [number, number][];
+          state?: { dxy_mom?: number; dxy_z?: number; dxy_vol_bp?: number } };
+  cot?: { rows: CotRow[]; stored: number; latest: string | null; error: string;
+          last_fetch_ns: number; running: boolean };
+}
+
+export interface TerminalView {
+  available: boolean; applicable?: boolean; enabled?: boolean; state?: string;
+  state_fa?: string; detail?: string; down_since_ns?: number; failures?: number;
+  attempts?: number; next_attempt_ns?: number; last_action?: string; last_action_ns?: number;
+  recoveries?: number; algo_trading?: boolean | null; ping_ms?: number | null;
+  last_check_ns?: number; can_sign_in?: boolean;
+  config?: { enabled: boolean; grace_checks: number; backoff_initial_sec: number;
+             backoff_max_sec: number; kill_hung_after_failures: number;
+             restore_account: boolean };
 }

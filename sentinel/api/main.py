@@ -39,7 +39,7 @@ from ..core.config import AgentMode
 from .security import SECURITY_HEADERS, SecurityManager, Session
 from .state import Runtime
 
-API_VERSION = "1.7.0"
+API_VERSION = "1.8.0"
 
 
 class LoginRequest(BaseModel):
@@ -149,6 +149,11 @@ class NotifyChannelSave(BaseModel):
 
 class NotifyChannelRef(BaseModel):
     channel: str = Field(pattern=r"^(telegram|bale)$")
+
+
+class SectionPatch(BaseModel):
+    """Fields of one configuration section; validated by the section's model."""
+    patch: Dict[str, Any] = Field(max_length=40)
 
 
 class ReferenceSave(BaseModel):
@@ -1269,6 +1274,54 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                         session: Session = Depends(require_write("notify_discover",
                                                                  requires_owner=True))):
         return _notifier_or_409().discover(body.channel)
+
+    # -- macro context: dollar index and COT ----------------------------------- #
+
+    @app.get("/api/macro")
+    def macro_overview(session: Session = Depends(current_session)):
+        return runtime.macro_view()
+
+    @app.post("/api/macro/settings")
+    def macro_settings(body: SectionPatch,
+                       session: Session = Depends(require_write("macro_settings",
+                                                                requires_owner=True))):
+        if getattr(runtime, "macro", None) is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "the macro desk is not wired")
+        try:
+            result = runtime.update_config({"macro": body.patch}, session.username)
+        except Exception as exc:  # noqa: BLE001 - validation errors are user errors
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:400])
+        return {**result, "macro": runtime.macro_view()}
+
+    @app.post("/api/macro/cot/refresh")
+    def macro_cot_refresh(session: Session = Depends(require_write("macro_cot",
+                                                                   requires_owner=True))):
+        macro = getattr(runtime, "macro", None)
+        if macro is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "the macro desk is not wired")
+        # HTTP to the CFTC only -- never the MetaTrader terminal -- so it is
+        # safe on this thread.
+        return macro.refresh_cot(by=session.username)
+
+    # -- the MetaTrader terminal watchdog ------------------------------------ #
+
+    @app.get("/api/terminal")
+    def terminal_overview(session: Session = Depends(current_session)):
+        wd = getattr(runtime.agent, "terminal_watchdog", None)
+        return {"available": wd is not None,
+                "config": runtime.agent.config.ops.terminal_watchdog.model_dump(mode="json"),
+                **(wd.status() if wd is not None else {})}
+
+    @app.post("/api/terminal/settings")
+    def terminal_settings(body: SectionPatch,
+                          session: Session = Depends(require_write("terminal_watchdog",
+                                                                   requires_owner=True))):
+        try:
+            result = runtime.update_config({"ops": {"terminal_watchdog": body.patch}},
+                                           session.username)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:400])
+        return result
 
     # -- independent reference price (TradingView) ------------------------------ #
 

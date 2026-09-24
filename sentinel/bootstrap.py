@@ -148,6 +148,14 @@ def _connection_kwargs(config, state_dir, audit) -> dict:
         if secret:
             if adapter == "mt5":
                 kwargs["password"] = secret
+                # For the terminal watchdog's re-sign-in: read the store again
+                # when needed rather than keep the password in memory.
+                ref, secrets_path = conn.secret_ref, state_dir / "broker-secrets.json"
+
+                def _mt5_password(ref=ref, path=secrets_path):
+                    from .brokers.secrets import SecretStore
+                    return SecretStore(path).get(ref)
+                kwargs["credential_fn"] = _mt5_password
             elif adapter == "oanda":
                 kwargs["token"] = secret
             elif adapter == "ccxt":
@@ -446,6 +454,26 @@ def build_runtime(config_path: str | Path = "var/config.json",
         model_dir=state_dir / "brain-models"))
     agent.brain = brain
     runtime.brain = brain
+
+    # --- macro context: the dollar index and CFTC positioning ------------- #
+    from .data.cot import CotStore
+    from .data.macro import MacroDesk
+
+    macro = MacroDesk(lambda: agent.config.macro, CotStore(state_dir / "macro.db"),
+                      feed.store, audit)
+    agent.macro = macro
+    runtime.macro = macro
+    brain.lab.deps.macro = macro
+
+    # --- the MetaTrader terminal watchdog --------------------------------- #
+    # Only meaningful for an adapter that can report and restore its terminal
+    # (MT5, directly or over the bridge); inert for every other venue.
+    from .ops.terminal_watchdog import TerminalWatchdog
+
+    watchdog = TerminalWatchdog(agent.broker, audit,
+                                lambda: agent.config.ops.terminal_watchdog)
+    if watchdog.applicable:
+        agent.terminal_watchdog = watchdog
 
     # --- owner notifications: Telegram and Bale ---------------------------- #
     # Driven by the audit journal, so every event that is recorded can be

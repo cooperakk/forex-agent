@@ -1,5 +1,83 @@
 # Changelog
 
+## 1.8.0 -- 2026-09-24
+
+### Added -- the US dollar index (`sentinel/data/dxy.py`)
+
+- The index is rebuilt from the broker's own bars with ICE's published formula
+  (six components, constant 50.14348112).
+  - The agent refreshes the components on its own thread through the feed.
+  - A server without USD/SEK gets a flagged proxy (`complete=False`) whose
+    returns track the index.
+- Causal features on every signal: `dxy_mom` (20-bar move in units of its own
+  noise), `dxy_z`, `usd_side` and `dxy_align`.
+
+### Added -- CFTC Commitments of Traders (`sentinel/data/cot.py`)
+
+- Legacy futures-only positioning for EUR, JPY, GBP, CHF, CAD, AUD, NZD and
+  MXN, the dollar index, gold and silver.
+- Sources:
+  - the CFTC Public Reporting API, at a fixed host, with no redirects and a
+    size cap, refreshed from the background worker;
+  - or the CFTC's yearly zip files, via `scripts/cot_data.py --import`, for
+    servers that cannot reach the API.
+- `scripts/cot_data.py --selftest` tests the live API from the server.
+- No look-ahead: each report is usable only from its Friday release
+  (Tuesday + 3 days, 21:00 UTC), live and in the lab alike.
+- Positioning index over 156 weeks, and centred features `cot_base`,
+  `cot_quote` and `cot_with_trade`.
+- A weekly `macro.cot` summary goes to Telegram and Bale.
+
+### Added -- the macro desk (`sentinel/data/macro.py`) and two shrink-only layers
+
+- `cot_crowding` (×0.75): the trade is on the side of a crowded speculative
+  position (index ≥ 90 / ≤ 10). The basis is Brunnermeier, Nagel & Pedersen
+  (2008) on positioning and crash risk.
+- `dxy_headwind` (×0.75): the trade is against a statistically strong dollar
+  move (|momentum| ≥ 2).
+- Both are recorded in `brain_layers`, so the brain's scorecard measures them,
+  and both can be switched off.
+- The macro features join every signal's record. The nightly lab joins them to
+  its training rows as of each row's own time, so a meta-label filter can learn
+  from them out of sample.
+- Dashboard page «دلار و COT (بازار کلان)»: the DXY chart and momentum, a COT
+  positioning table with crowded zones, and settings.
+- API: `GET /api/macro`, plus owner+TOTP `POST /api/macro/settings` and
+  `POST /api/macro/cot/refresh`.
+
+### Added -- MetaTrader terminal watchdog (`sentinel/ops/terminal_watchdog.py`)
+
+- It runs at the top of every cycle, on the agent's thread. It detects:
+  - a closed or frozen terminal;
+  - a lost broker link;
+  - the login dialog;
+  - a wrong account;
+  - Algo Trading switched off.
+- The ladder: grace checks, then reconnect. `MetaTrader5.initialize()` starts
+  the terminal and signs in with the stored credential, fetched at that moment.
+- Retries back off (30 s up to 10 min).
+- After repeated failures it ends a frozen terminal at the configured path
+  only, locally only, with the path passed in an environment variable.
+- A wrong account is only reported in attach mode, and restored in sign-in
+  mode.
+- It never touches positions. After a recovery the agent reconciles in the
+  same cycle.
+- Every step is journalled as `ops.mt5_watchdog` and notified, with one message
+  key per outage.
+- `MT5Broker.health()`, `reconnect()` and `kill_terminal()`, with a
+  `credential_fn` from bootstrap. The watchdog reads through the account
+  binding.
+- Dashboard: a watchdog card on «بروکر و اتصال» and a banner while the
+  terminal is down. API: `GET /api/terminal` and owner+TOTP
+  `POST /api/terminal/settings`.
+
+### Changed
+
+- Environment checks probe the CFTC API. Backups include `macro.db`.
+- Docs: [`docs/MACRO-AND-WATCHDOG.md`](docs/MACRO-AND-WATCHDOG.md); the Persian
+  install and Alpari guides cover the watchdog and COT import.
+- API version 1.8.0.
+
 ## 1.7.0 -- 2026-09-24
 
 ### Added -- the brain (`sentinel/brain`), shrink-only learning

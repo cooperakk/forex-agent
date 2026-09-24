@@ -159,8 +159,17 @@ class Agent:
         entry_gate: Optional[Callable[[], tuple]] = None,
         reference: Any = None,
         brain: Any = None,
+        macro: Any = None,
+        terminal_watchdog: Any = None,
     ) -> None:
         self.config = config
+        #: sentinel.data.macro.MacroDesk, or None: the dollar index and CFTC
+        #: positioning, as features for every signal and as two shrink-only
+        #: layers. Its absence changes nothing.
+        self.macro = macro
+        #: sentinel.ops.terminal_watchdog.TerminalWatchdog, or None: keeps a
+        #: MetaTrader terminal open and signed in. Never touches a position.
+        self.terminal_watchdog = terminal_watchdog
         #: sentinel.brain.Brain, or None. Learns from every signal (taken or
         #: not) and can only shrink, rest or refuse -- see sentinel/brain.
         self.brain = brain
@@ -566,6 +575,19 @@ class Agent:
         report.kill_switch = kill_state.engaged
 
         # --- 2. health ------------------------------------------------------ #
+        # The terminal first: a closed or frozen MetaTrader is brought back
+        # here, before this cycle tries to read the account through it.
+        if self.terminal_watchdog is not None:
+            try:
+                recovered_before = self.terminal_watchdog.recoveries
+                self.terminal_watchdog.check(now)
+                if self.terminal_watchdog.recoveries != recovered_before:
+                    # Whatever happened while the terminal was away, compare
+                    # the books again THIS cycle rather than at the next slot.
+                    self.last_reconcile_ns = 0
+            except Exception as exc:  # noqa: BLE001 - the watchdog is an aid
+                self.audit.append(EventType.CONNECTIVITY,
+                                  {"terminal_watchdog_failed": str(exc)[:200]})
         connected = self.health.probe(self.broker, now_ns=now)
         symbols = self._active_instruments()
         # Every timeframe an enabled allocation declares, so a daily system is
@@ -659,6 +681,14 @@ class Agent:
                 self.halt("reconciliation mismatch: " +
                           (", ".join(m.kind for m in rec.mismatches) or "unresolved orders"))
             positions = self._hydrate(self.broker.positions())
+
+        # The dollar index: its six components' bars are refreshed here, on
+        # this thread, through the same feed as every other price.
+        if self.macro is not None:
+            try:
+                self.macro.refresh_prices(self.feed, now, self.broker.instruments())
+            except Exception as exc:  # noqa: BLE001 - context, never a gate
+                report.errors.append(f"macro refresh failed: {exc}")
 
         # --- 4. regime ------------------------------------------------------ #
         frames = {s: snap.frames[s] for s in symbols
@@ -1754,12 +1784,21 @@ class Agent:
         # features, the similar-situation memory's query, and the shadow
         # book's record, all from one causal computation.
         context: Dict[str, float] = {}
+        # The signal was raised on a CLOSED bar that started at decision_ns; it
+        # is acted on after that bar's end, so that is the "as of" time for
+        # anything outside the bar itself (the dollar index, COT).
+        from ..data.feed import TIMEFRAME_SECONDS
+        as_of_ns = int(signal.decision_ns) + \
+            TIMEFRAME_SECONDS.get(signal.timeframe, 3600) * 1_000_000_000
         try:
             from ..research.metalabel import bar_context_features, signal_features
             frame = snap.frames_for(signal.timeframe).get(signal.instrument) \
                 if snap is not None else None
             context = bar_context_features(frame, len(frame) - 1) \
                 if frame is not None and len(frame) else {}
+            if self.macro is not None:
+                context.update(self.macro.features(signal.instrument, signal.side.sign,
+                                                   as_of_ns))
             meta_diag["meta_features"] = {k: float(v) for k, v in
                                           signal_features(signal, context).items()}
         except Exception:  # noqa: BLE001 - features are an aid, never a gate
@@ -1775,6 +1814,19 @@ class Agent:
                     decision.lessons.append(why_sim)
             except Exception as exc:  # noqa: BLE001
                 self.audit.append(EventType.LESSON, {"brain_similarity_failed": str(exc)[:200]})
+        # Crowded speculative positioning (COT) and a dollar moving hard
+        # against the trade: shrink-only, and scored by the brain like any
+        # other layer.
+        if self.macro is not None:
+            try:
+                m_mac, why_mac, mac_layers = self.macro.layers(
+                    signal.instrument, signal.side.sign, as_of_ns)
+                if m_mac < 1.0:
+                    layers.update(mac_layers)
+                    caution = float(min(caution, m_mac))
+                    decision.lessons.extend(why_mac)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.append(EventType.LESSON, {"macro_layers_failed": str(exc)[:200]})
         meta_diag["brain_layers"] = layers
 
         # The meta-label gate: whether to act on THIS primary signal at all,
