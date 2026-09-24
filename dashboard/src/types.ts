@@ -5,7 +5,7 @@ export interface Veto { rule: string; message: string; severity: string; observe
 
 export interface Decision {
   ts_ns: number; strategy: string; instrument: string;
-  action: "proposed" | "executed" | "vetoed" | "skipped" | "queued";
+  action: "proposed" | "executed" | "vetoed" | "skipped" | "queued" | "preview";
   side?: string | null; lots?: string | null; entry?: string | null;
   stop?: string | null; target?: string | null;
   risk_amount?: string | null; risk_pct?: string | null;
@@ -56,6 +56,10 @@ export interface Status {
   config_version: number; errors: string[];
   security_warning?: string;
   api_version?: string;
+  /** strategy -> why the performance guard suspended it (1.5.0). */
+  guard_suspended?: Record<string, string>;
+  /** Whether NEW live risk may be opened right now, as far as the licence goes. */
+  entries_permitted?: { allowed: boolean; reason: string };
 }
 
 export interface RiskView {
@@ -248,4 +252,58 @@ export interface AccountsView {
   users: AccountRow[];
   roles: { id: string; label: string; description: string }[];
   min_password_length: number;
+}
+
+/* ---------------------------------------------------------------------- *
+ * AI assistants and news (1.5.0). Fetched on demand, never in the snapshot.
+ * ---------------------------------------------------------------------- */
+
+export interface AIProviderRow {
+  id: string; label: string; label_fa: string; enabled: boolean;
+  model: string; default_model: string; notes_fa: string; console_url: string;
+  key_prefix_hint: string; key_stored: boolean; key_last4: string | null;
+  base_url?: string;
+}
+
+export interface AIOverview {
+  enabled: boolean;
+  providers?: AIProviderRow[];
+  primary?: string; fallbacks?: string[];
+  purposes?: Record<string, boolean>;
+  max_calls_per_hour?: number; max_calls_per_day?: number;
+  available?: Record<string, { ok: boolean; reason: string }>;
+  key_storage?: string;
+  usage?: { last_24h: any[]; recent: any[] } | null;
+  calls_last_hour?: number;
+}
+
+export interface AIReview {
+  trade_id: string; ts_ns: number; strategy: string; instrument: string;
+  r_multiple: number; provider: string; model: string;
+  payload: {
+    summary_fa: string; what_went_right_fa: string | null;
+    what_went_wrong_fa: string | null; category: string; avoidable: boolean;
+    suggestion_fa: string; confidence: number;
+  };
+}
+
+export interface Headline {
+  article_id: string; feed: string; source: string; title: string; summary: string;
+  link: string; published_ns: number | null; currencies: string[];
+  extraction?: {
+    valid: boolean; event_type: string; direction_claim: string; is_correction: boolean;
+    contradicts_prior: boolean; confidence: number; errors: string[];
+  };
+}
+
+export interface AIInsights {
+  reviews: AIReview[];
+  themes: null | { reviewed: number; avoidable: number; note_fa: string;
+                   categories: { category: string; count: number }[] };
+  brief: null | { ts_ns: number; provider: string; model: string;
+                  payload: { headline_fa: string; market_fa: string; risks_fa: string[];
+                             agent_state_fa: string; watch_fa: string[] } };
+  headlines: Headline[];
+  desk: null | Record<string, any>;
+  background_errors: string[];
 }

@@ -5,6 +5,8 @@ import {
 } from "./api";
 import { Banner, Card, Chip, ConfirmWrite, Hint, Seg, useLocalState } from "./components/ui";
 import AgentPage from "./pages/AgentPage";
+import AIPage from "./pages/AIPage";
+import ManualTrade from "./pages/ManualTrade";
 import Audit from "./pages/Audit";
 import Brokers from "./pages/Brokers";
 import Glossary from "./pages/Glossary";
@@ -18,18 +20,20 @@ import Settings from "./pages/Settings";
 import Users from "./pages/Users";
 import type { Snapshot } from "./types";
 
-type Page = "overview" | "positions" | "journal" | "risk" | "research" | "agent"
-  | "settings" | "brokers" | "users" | "licence" | "audit" | "glossary";
+type Page = "overview" | "positions" | "manual" | "journal" | "risk" | "research" | "agent"
+  | "ai" | "settings" | "brokers" | "users" | "licence" | "audit" | "glossary";
 
 /* Nav labels are the first words a newcomer reads, so they say what the page
    shows rather than what the subsystem is called. */
 const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "overview", label: "نمای کلی", icon: "◧" },
   { id: "positions", label: "معامله‌های باز", icon: "◈" },
+  { id: "manual", label: "معامله دستی", icon: "✎" },
   { id: "journal", label: "تاریخچه معامله‌ها", icon: "▤" },
   { id: "risk", label: "سقف‌های ایمنی", icon: "◉" },
   { id: "research", label: "آزمایش و اثبات", icon: "⬡" },
   { id: "agent", label: "تصمیم‌های ربات", icon: "◐" },
+  { id: "ai", label: "هوش مصنوعی و اخبار", icon: "✦" },
   { id: "settings", label: "تنظیمات", icon: "⚙" },
   { id: "brokers", label: "بروکر و اتصال", icon: "⇄" },
   { id: "users", label: "کاربران", icon: "☰" },
@@ -225,6 +229,23 @@ export default function App() {
               </Banner>
             </div>
           )}
+          {s.entries_permitted && !s.entries_permitted.allowed && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="neg" icon="⬚">
+                <strong>معامله تازه با پول واقعی متوقف است.</strong>{" "}
+                {s.entries_permitted.reason} معامله‌های باز همچنان مدیریت و محافظت می‌شوند.
+              </Banner>
+            </div>
+          )}
+          {s.guard_suspended && Object.keys(s.guard_suspended).length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="warn" icon="⏸">
+                <strong>نگهبان عملکرد این استراتژی‌ها را معلق کرده است:</strong>{" "}
+                {Object.keys(s.guard_suspended).join("، ")} — به‌خاطر ضرر آماری مداوم، تا
+                وقتی شما در صفحه «تصمیم‌های ربات» آزادشان نکنید معامله تازه باز نمی‌کنند.
+              </Banner>
+            </div>
+          )}
           {error && (
             <div style={{ marginBottom: 16 }}>
               <Banner tone="neg" icon="✕">
@@ -235,6 +256,10 @@ export default function App() {
 
           {page === "overview" && <Overview snap={snap} />}
           {page === "positions" && <Positions snap={snap} write={write} />}
+          {page === "manual" && <ManualTrade snap={snap} provider={provider} write={write}
+                                             readOnly={readOnly} />}
+          {page === "ai" && <AIPage provider={provider} write={write} readOnly={readOnly}
+                                    canAdminister={canAdminister} />}
           {page === "journal" && <Journal snap={snap} />}
           {page === "risk" && <Risk snap={snap} />}
           {page === "research" && <Research snap={snap} />}
