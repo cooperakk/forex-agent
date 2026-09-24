@@ -1,0 +1,28 @@
+[Unit]
+Description=Sentinel-FX dead-man watchdog for account %i
+After=sentinel-account@%i.service
+Wants=sentinel-account@%i.service
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+WorkingDirectory=/opt/sentinel-fx
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=UTC
+ExecStart=/opt/sentinel-fx/.venv/bin/python scripts/run_account.py %i --root /var/lib/sentinel/accounts --watchdog --console
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+UMask=0077
+ReadWritePaths=/var/lib/sentinel/accounts/%i
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel-%i-watchdog
+
+[Install]
+WantedBy=multi-user.target

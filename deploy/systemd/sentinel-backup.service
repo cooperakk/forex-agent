@@ -1,0 +1,21 @@
+[Unit]
+Description=Sentinel-FX state backup (audit chain, verdicts, agent state)
+
+[Service]
+Type=oneshot
+User=sentinel
+Group=sentinel
+WorkingDirectory=/opt/sentinel-fx
+Environment=TZ=UTC
+ExecStart=/opt/sentinel-fx/deploy/backup.sh /var/lib/sentinel /var/backups/sentinel
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# BOTH paths must be writable. sqlite3 .backup opens the source database, and a
+# WAL database cannot be opened at all without creating its -shm file in the
+# SOURCE directory -- so with only /var/backups writable the script failed on
+# the first database and, because of `set -e`, produced NO archive at all. The
+# only symptom was a failed oneshot in the journal every six hours.
+ReadWritePaths=/var/lib/sentinel /var/backups/sentinel
+UMask=0077

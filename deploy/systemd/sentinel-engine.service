@@ -1,0 +1,86 @@
+[Unit]
+Description=Sentinel-FX trading engine
+Documentation=file:/opt/sentinel-fx/docs/DEPLOYMENT.md
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+# A trading process whose clock is wrong mis-stamps every decision, every
+# idempotency key and every session-window check. time-sync.target above is
+# the portable way to wait for whichever NTP client this host runs; the engine
+# additionally checks its own clock drift at runtime and refuses to trade when
+# it exceeds the configured tolerance.
+
+# THE IMPORTANT PART. Without a burst limit, a process that crashes on every
+# startup for a reason systemd cannot see -- a bad credential, a corrupt
+# verdict registry, a broker rejecting every request -- is restarted forever,
+# and each restart is another chance to re-submit an order whose fate is
+# unknown. Five failures inside ten minutes stops the unit and leaves it
+# stopped for a human. This is the behaviour you want at 03:00.
+# These keys belong in [Unit]; systemd ignores them in [Service].
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+WorkingDirectory=/opt/sentinel-fx
+# EnvironmentFile FIRST: systemd applies these in directive order and the
+# last one wins, so placing it after Environment= let the ops env file
+# silently override the unit's own settings.
+EnvironmentFile=/etc/sentinel/sentinel.env
+Environment=PYTHONUNBUFFERED=1
+Environment=SENTINEL_CONFIG=/var/lib/sentinel/config.json
+Environment=TZ=UTC
+
+ExecStart=/opt/sentinel-fx/.venv/bin/python scripts/serve.py \
+    --config /var/lib/sentinel/config.json \
+    --dashboard /opt/sentinel-fx/dashboard/dist
+
+# SIGTERM reaches the process so the agent runs its shutdown path: stop the
+# loop, flush state, close the audit file cleanly. 40s is deliberately longer
+# than one decision cycle plus one broker round-trip.
+KillSignal=SIGTERM
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=10
+
+# Hardening. The engine needs: its own code (read-only), its state directory
+# (read-write), and outbound network. Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+StateDirectory=sentinel
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/sentinel
+
+LimitNOFILE=8192
+OOMPolicy=stop
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel-engine
+
+[Install]
+WantedBy=multi-user.target

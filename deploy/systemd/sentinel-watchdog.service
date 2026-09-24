@@ -1,0 +1,59 @@
+[Unit]
+Description=Sentinel-FX dead-man watchdog
+Documentation=file:/opt/sentinel-fx/docs/DEPLOYMENT.md
+After=sentinel-engine.service
+
+# NOT Requires=. The watchdog's whole job is to be running when the engine is
+# not. Binding it to the engine's state would stop it at exactly the moment it
+# becomes useful.
+Wants=sentinel-engine.service
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+WorkingDirectory=/opt/sentinel-fx
+# EnvironmentFile FIRST: systemd applies these in directive order and the
+# last one wins, so placing it after Environment= let the ops env file
+# silently override the unit's own settings.
+EnvironmentFile=-/etc/sentinel/sentinel.env
+Environment=PYTHONUNBUFFERED=1
+Environment=SENTINEL_CONFIG=/var/lib/sentinel/config.json
+Environment=TZ=UTC
+
+ExecStart=/opt/sentinel-fx/.venv/bin/python -m sentinel.ops.watchdog \
+    --heartbeat /var/lib/sentinel/var/heartbeat.json \
+    --kill-file /var/lib/sentinel/var/KILL \
+    --audit     /var/lib/sentinel/var/watchdog.jsonl \
+    --poll 5
+# --timeout and --action come from ops.deadman_timeout_sec / ops.deadman_action
+# in the config, so they are settings rather than dead fields.
+
+# The watchdog restarts unconditionally and without a burst limit: unlike the
+# engine, a restarting watchdog cannot place an order, so restart loops are
+# merely noisy rather than dangerous. A watchdog that gives up is worthless.
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+UMask=0077
+
+ReadWritePaths=/var/lib/sentinel
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel-watchdog
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,171 @@
+{
+  "version": "2026.09-offline",
+  "note": [
+    "A schedule of RECURRING RELEASE PATTERNS, not a list of confirmed dates.",
+    "It exists so the blackout logic, the tiering and the surprise maths can be",
+    "exercised end to end on a machine with no network and no data subscription.",
+    "",
+    "Each series carries a `certainty`, and that field is the honest part:",
+    "",
+    "  confirmed          the exact date and time came from a feed. Nothing in",
+    "                     this bundled file is ever `confirmed` -- only ingestion",
+    "                     from a live source can set it.",
+    "  scheduled_pattern  the DAY is structural and published as a rule by the",
+    "                     statistical agency (payrolls on the first Friday, ISM",
+    "                     on the first business day). The time is the agency's",
+    "                     standing release time. These drive blackout windows.",
+    "  approximate        the day is a typical-case guess inside a window. These",
+    "                     do NOT drive blackouts -- a stale guess that blocks",
+    "                     trading on the wrong day is worse than no calendar,",
+    "                     and one that clears the real day is worse still. They",
+    "                     surface as 'confirm this date' advisories instead.",
+    "",
+    "Central bank meeting dates are published a year or more ahead by each bank.",
+    "They are NOT reproduced here as literal dates, because a bundled date that",
+    "is wrong reads exactly like one that is right. The cadence patterns below",
+    "generate advisory placeholders; the documented ingestion hook is how real",
+    "dates get in."
+  ],
+  "series": [
+    {
+      "series_id": "US.NFP",
+      "name": "Non-Farm Payrolls",
+      "country": "US", "currency": "USD",
+      "zone": "America/New_York", "local_time": "08:30",
+      "unit": "k jobs", "curated_tier": "high",
+      "certainty": "scheduled_pattern",
+      "recurrence": {"kind": "nth_weekday", "nth": 1, "weekday": 4, "every_months": 1},
+      "period_lag_months": 1,
+      "note": "BLS releases the Employment Situation on the third Friday after the reference week, which is the first Friday of the month in all but a handful of years."
+    },
+    {
+      "series_id": "US.ISM_MFG",
+      "name": "ISM Manufacturing PMI",
+      "country": "US", "currency": "USD",
+      "zone": "America/New_York", "local_time": "10:00",
+      "unit": "index", "curated_tier": "medium",
+      "certainty": "scheduled_pattern",
+      "recurrence": {"kind": "nth_business_day", "nth": 1, "every_months": 1},
+      "period_lag_months": 1
+    },
+    {
+      "series_id": "US.CPI",
+      "name": "CPI (headline, m/m)",
+      "country": "US", "currency": "USD",
+      "zone": "America/New_York", "local_time": "08:30",
+      "unit": "% m/m", "curated_tier": "high",
+      "certainty": "approximate",
+      "recurrence": {"kind": "day_window", "earliest_day": 10, "latest_day": 15,
+                     "typical_day": 12, "weekdays_only": true, "every_months": 1},
+      "period_lag_months": 1
+    },
+    {
+      "series_id": "US.RETAIL_SALES",
+      "name": "Retail Sales (m/m)",
+      "country": "US", "currency": "USD",
+      "zone": "America/New_York", "local_time": "08:30",
+      "unit": "% m/m", "curated_tier": "medium",
+      "certainty": "approximate",
+      "recurrence": {"kind": "day_window", "earliest_day": 14, "latest_day": 18,
+                     "typical_day": 16, "weekdays_only": true, "every_months": 1},
+      "period_lag_months": 1
+    },
+    {
+      "series_id": "US.GDP_ADV",
+      "name": "GDP (advance estimate)",
+      "country": "US", "currency": "USD",
+      "zone": "America/New_York", "local_time": "08:30",
+      "unit": "% q/q saar", "curated_tier": "medium",
+      "certainty": "approximate",
+      "recurrence": {"kind": "day_window", "earliest_day": 25, "latest_day": 31,
+                     "typical_day": 29, "weekdays_only": true, "every_months": 3,
+                     "anchor_month": 1}
+    },
+    {
+      "series_id": "US.FOMC",
+      "name": "FOMC rate decision",
+      "country": "US", "currency": "USD",
+      "zone": "America/New_York", "local_time": "14:00",
+      "unit": "%", "curated_tier": "high",
+      "certainty": "approximate",
+      "recurrence": {"kind": "every_n_weeks", "weeks": 6, "weekday": 2,
+                     "anchor": "2026-01-28"},
+      "note": "Eight meetings a year on a six-to-seven week cadence, decision at 14:00 New York. The cadence is real; the individual dates are not confirmed here."
+    },
+    {
+      "series_id": "EU.ECB",
+      "name": "ECB monetary policy decision",
+      "country": "EU", "currency": "EUR",
+      "zone": "Europe/Frankfurt", "local_time": "14:15",
+      "unit": "%", "curated_tier": "high",
+      "certainty": "approximate",
+      "recurrence": {"kind": "every_n_weeks", "weeks": 6, "weekday": 3,
+                     "anchor": "2026-02-05"},
+      "note": "Decision at 14:15 Frankfurt, press conference 14:45. Frankfurt is CET/CEST, and its summer-time window is NOT the same as New York's."
+    },
+    {
+      "series_id": "EU.CPI_FLASH",
+      "name": "Euro area flash HICP",
+      "country": "EU", "currency": "EUR",
+      "zone": "Europe/Frankfurt", "local_time": "11:00",
+      "unit": "% y/y", "curated_tier": "medium",
+      "certainty": "approximate",
+      "recurrence": {"kind": "day_window", "earliest_day": 29, "latest_day": 31,
+                     "typical_day": 31, "weekdays_only": true, "every_months": 1}
+    },
+    {
+      "series_id": "UK.BOE",
+      "name": "Bank of England Bank Rate",
+      "country": "UK", "currency": "GBP",
+      "zone": "Europe/London", "local_time": "12:00",
+      "unit": "%", "curated_tier": "high",
+      "certainty": "approximate",
+      "recurrence": {"kind": "every_n_weeks", "weeks": 6, "weekday": 3,
+                     "anchor": "2026-02-05"}
+    },
+    {
+      "series_id": "UK.CPI",
+      "name": "UK CPI (y/y)",
+      "country": "UK", "currency": "GBP",
+      "zone": "Europe/London", "local_time": "07:00",
+      "unit": "% y/y", "curated_tier": "medium",
+      "certainty": "approximate",
+      "recurrence": {"kind": "day_window", "earliest_day": 15, "latest_day": 20,
+                     "typical_day": 17, "weekdays_only": true, "every_months": 1},
+      "period_lag_months": 1
+    },
+    {
+      "series_id": "JP.BOJ",
+      "name": "Bank of Japan policy decision",
+      "country": "JP", "currency": "JPY",
+      "zone": "Asia/Tokyo", "local_time": "12:00",
+      "unit": "%", "curated_tier": "high",
+      "certainty": "approximate",
+      "recurrence": {"kind": "every_n_weeks", "weeks": 7, "weekday": 4,
+                     "anchor": "2026-01-23"},
+      "note": "Tokyo has observed no summer time since 1951, so JST is UTC+9 all year. The release time drifts relative to a London-based blackout only because London itself moves."
+    },
+    {
+      "series_id": "CA.EMPLOYMENT",
+      "name": "Canada Labour Force Survey",
+      "country": "CA", "currency": "CAD",
+      "zone": "America/New_York", "local_time": "08:30",
+      "unit": "k jobs", "curated_tier": "medium",
+      "certainty": "scheduled_pattern",
+      "recurrence": {"kind": "nth_weekday", "nth": 1, "weekday": 4, "every_months": 1},
+      "period_lag_months": 1,
+      "note": "Ottawa is in the same DST regime as New York, so one offset serves both."
+    },
+    {
+      "series_id": "AU.RBA",
+      "name": "RBA cash rate decision",
+      "country": "AU", "currency": "AUD",
+      "zone": "UTC", "local_time": "03:30",
+      "unit": "%", "curated_tier": "high",
+      "certainty": "approximate",
+      "recurrence": {"kind": "every_n_weeks", "weeks": 6, "weekday": 1,
+                     "anchor": "2026-02-03"},
+      "note": "Stored in UTC rather than Australia/Sydney: southern-hemisphere summer time runs the opposite way round and is not implemented in core.tzrules. Pretending otherwise would be the exact failure this file exists to avoid."
+    }
+  ]
+}
