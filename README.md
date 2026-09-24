@@ -182,6 +182,13 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 آزمایشگاه شبانه و «فیلتر دوم» که فقط با تأیید مالک فعال می‌شود. همه‌ی لایه‌ها فقط
 می‌توانند **محتاط‌تر** کنند.
 
+**دلار و COT (۱٫۸٫۰)** — شاخص دلار از قیمت‌های خود بروکر با فرمول رسمی ICE، و موقعیت
+صندوق‌ها و سفته‌بازان بزرگ از گزارش هفتگی CFTC، بدون نگاه به آینده؛ هم به‌عنوان داده‌ی
+یادگیری برای هر سیگنال و هم دو لایه‌ی فقط‌کاهنده («موقعیت شلوغ» و «باد مخالف دلار»).
+
+**نگهبان متاتریدر** — اگر متاتریدر بسته شود، قفل کند یا قطع شود، خودش بازش می‌کند و وارد
+حساب می‌شود؛ هرگز به معامله‌ها دست نمی‌زند.
+
 **اعلان روی تلگرام و بله** — هشدارها، معامله‌ها، گزارش روزانه و هفتگی؛ از گوشی فقط
 «وضعیت» و «توقف» — هیچ دستوری برای باز کردن معامله یا برداشتن توقف وجود ندارد.
 
@@ -203,6 +210,7 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 | [`docs/ALPARI-MT5-FA.md`](docs/ALPARI-MT5-FA.md) | **آلپاری + متاتریدر ۵: چرا حساب وارد نمی‌شود و چطور ربات را وصل کنیم** |
 | [`docs/BRAIN.md`](docs/BRAIN.md) | The brain: shadow book, drift, cooldowns, stress, meta-label lab |
 | [`docs/RESEARCH-NOTES.md`](docs/RESEARCH-NOTES.md) | Published evidence and market failures behind the design |
+| [`docs/MACRO-AND-WATCHDOG.md`](docs/MACRO-AND-WATCHDOG.md) | Dollar index, COT positioning, and the MetaTrader terminal watchdog |
 | [`docs/WINDOWS-SERVER.md`](docs/WINDOWS-SERVER.md) | Windows Server installation and operations |
 | [`docs/AI-PROVIDERS.md`](docs/AI-PROVIDERS.md) | AI providers, keys, and what a model may do |
 | [`docs/TRADINGVIEW.md`](docs/TRADINGVIEW.md) | TradingView reference price, ratings and research history |
@@ -212,6 +220,27 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 ---
 
 ## English
+
+### What's new in 1.8.1
+
+* **Windows fix:** the engine supervisor died a second after start under
+  Windows PowerShell 5.1 (redirected stderr + `Stop`), so the engine never
+  stayed up and the watchdog engaged the kill switch. Fixed and pinned by a
+  test. The kill switch can now be released from the dashboard header.
+* A short Persian Windows guide ships at the top of the package
+  (`00-WINDOWS-GUIDE-FA.html`), and the enrolment file spells out the
+  authenticator setup key.
+
+### What's new in 1.8.0
+
+* **US dollar index** rebuilt from the broker's own bars (ICE formula), and
+  **CFTC Commitments of Traders** positioning (API or yearly-file import, no
+  look-ahead). Both become features on every signal and two shrink-only
+  layers, `cot_crowding` and `dxy_headwind`, which the brain's scorecard
+  measures.
+* **MetaTrader terminal watchdog**: relaunches, re-signs-in and, as a last
+  resort, ends a frozen terminal at the configured path; never touches a
+  position. See [`docs/MACRO-AND-WATCHDOG.md`](docs/MACRO-AND-WATCHDOG.md).
 
 ### What's new in 1.7.0
 

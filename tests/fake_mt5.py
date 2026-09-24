@@ -184,6 +184,8 @@ class _Terminal:
     company: str = "MetaQuotes Software Corp."
     name: str = "MetaTrader 5"
     connected: bool = True
+    trade_allowed: bool = True
+    ping_last: int = 42_000            # microseconds, as the real terminal reports
 
 
 class FakeMT5:
@@ -278,12 +280,29 @@ class FakeMT5:
         self._deals: List[_Deal] = []
         self._next_ticket = 500001
         self.account = _Account()
+        self.terminal = _Terminal()
         self.sent_requests: List[Dict[str, Any]] = []
         self._last_error = (0, "ok")
 
     # -- API surface the adapter uses ---------------------------------- #
 
     def initialize(self, *args, **kwargs) -> bool:
+        # Watchdog scenarios: a real initialize() starts a closed terminal and,
+        # given credentials, signs in to that account.
+        self.init_calls = getattr(self, "init_calls", [])
+        self.init_calls.append({k: ("***" if k == "password" else v)
+                                for k, v in kwargs.items()})
+        if getattr(self, "fail_initialize", 0):
+            self.fail_initialize -= 1
+            self._last_error = (-10005, "IPC timeout")
+            return False
+        self.terminal_down = False
+        self.terminal.connected = True
+        if kwargs.get("login"):
+            self.account.login = int(kwargs["login"])
+            self.logged_out = False
+        elif getattr(self, "logged_out", False) and getattr(self, "autologin", True):
+            self.logged_out = False
         return True
 
     def shutdown(self) -> None:
@@ -346,10 +365,15 @@ class FakeMT5:
         return rows
 
     def account_info(self):
+        if getattr(self, "terminal_down", False) or getattr(self, "logged_out", False):
+            return None
         return self.account
 
     def terminal_info(self):
-        return _Terminal()
+        if getattr(self, "terminal_down", False):
+            self._last_error = (-10004, "No IPC connection")
+            return None
+        return self.terminal
 
     def positions_get(self, symbol: Optional[str] = None, **kwargs):
         if symbol is None:

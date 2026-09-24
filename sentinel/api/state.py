@@ -97,6 +97,7 @@ class Runtime:
         self.reference = None    # sentinel.data.reference.ReferenceDesk
         self.brain = None        # sentinel.brain.Brain
         self.notifier = None     # sentinel.notify.Notifier
+        self.macro = None        # sentinel.data.macro.MacroDesk
         self._bg_thread: Optional[threading.Thread] = None
         self.background_errors: List[str] = []
         self.background_last_ns: int = 0
@@ -434,7 +435,7 @@ class Runtime:
 
             if (self.news_desk is not None or self.coach is not None
                     or self.reference is not None or self.brain is not None
-                    or self.notifier is not None):
+                    or self.notifier is not None or self.macro is not None):
                 def background() -> None:
                     # First pass soon after start, then once a minute; each
                     # assistant decides for itself whether it is due.
@@ -454,7 +455,8 @@ class Runtime:
                            ("coach", getattr(self.coach, "tick", None)),
                            ("reference", getattr(self.reference, "tick", None)),
                            ("brain", getattr(self.brain, "tick", None)),
-                           ("notify", getattr(self.notifier, "tick", None))):
+                           ("notify", getattr(self.notifier, "tick", None)),
+                           ("macro", getattr(self.macro, "tick", None))):
             if step is None:
                 continue
             try:
@@ -610,9 +612,26 @@ class Runtime:
             "config_version": cfg.version,
             "errors": self.errors[-5:],
             "cooldowns": self._brain_cooldowns(),
+            "terminal": self._terminal_status(),
             "day_pnl": (str(acct.equity - agent.day_start_equity)
                         if "error" not in account and agent.day_start_equity > 0 else None),
         }
+
+    def _terminal_status(self) -> Optional[Dict[str, Any]]:
+        wd = getattr(self.agent, "terminal_watchdog", None)
+        if wd is None:
+            return None
+        try:
+            return wd.status()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def macro_view(self) -> Dict[str, Any]:
+        if self.macro is None:
+            return {"available": False}
+        view = self.macro.view()
+        view["available"] = True
+        return view
 
     def _brain_cooldowns(self) -> Dict[str, str]:
         if self.brain is None:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentinel-fx"
-version = "1.7.0"
+version = "1.8.1"
 description = "An autonomous FX trading agent built around capital preservation, statistical honesty and a tamper-evident audit trail."
 readme = "README.md"
 requires-python = ">=3.11"

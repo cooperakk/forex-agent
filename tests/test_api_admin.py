@@ -365,3 +365,11 @@ class TestFirstBootMessages:
         assert enrolments, "no enrolment file was written"
         mode = oct(enrolments[0].stat().st_mode & 0o777)
         assert mode == "0o600", f"the second factor was written {mode}"
+        # The URI stays on the first line; the setup key is spelled out below
+        # it, because "Enter a setup key" in an authenticator wants the key.
+        text = enrolments[0].read_text(encoding="utf-8")
+        first = text.splitlines()[0]
+        assert first.startswith("otpauth://")
+        from urllib.parse import parse_qs, urlparse
+        key = parse_qs(urlparse(first).query)["secret"][0]
+        assert f"key: {key}" in text and f"کلید: {key}" in text

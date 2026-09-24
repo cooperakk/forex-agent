@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import threading
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 
 from ..core.clock import wall_ns
 from ..core.errors import BrokerError, ConfigError, ConversionMissingError, UnknownOutcomeError
@@ -124,6 +124,24 @@ def _trade_mode(account: Any) -> int:
         return -1
 
 
+def _end_terminal_process(path: str) -> List[int]:
+    """Stop-Process every terminal64.exe whose executable is exactly ``path``.
+
+    The path travels in an environment variable, never inside the command
+    text, so a path with quotes in it cannot become PowerShell code.
+    """
+    import os
+    import subprocess
+    script = ("$p = $env:SENTINEL_TERMINAL_PATH; "
+              "Get-CimInstance Win32_Process -Filter \"Name='terminal64.exe'\" | "
+              "Where-Object { $_.ExecutablePath -eq $p } | "
+              "ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }")
+    r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                       env=dict(os.environ, SENTINEL_TERMINAL_PATH=path),
+                       capture_output=True, text=True, timeout=60)
+    return [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+
+
 class MT5Broker(Broker):
     def __init__(self, *, account_currency: str = "USD", magic: int = 770914,
                  instruments: Optional[Dict[str, Instrument]] = None,
@@ -136,7 +154,8 @@ class MT5Broker(Broker):
                  terminal_path: Optional[str] = None,
                  connect_timeout_ms: int = 30_000,
                  mt5_module: Any = None,
-                 state_path: Optional[str] = None) -> None:
+                 state_path: Optional[str] = None,
+                 credential_fn: Optional[Callable[[], Optional[str]]] = None) -> None:
         # The intent journal. MT5 has no client order id, so the only way to
         # answer "did my order go through?" after a restart is to remember what
         # was sent -- instrument, side, lots, time, risk -- and match deals
@@ -228,6 +247,20 @@ class MT5Broker(Broker):
                 code="NOT_LOGGED_IN")
         self._magic = magic
         self._ccy = account_currency
+
+        # What the terminal watchdog (ops/terminal_watchdog.py) needs to bring
+        # the terminal back: the connection arguments WITHOUT the password,
+        # and a function that fetches the password from the encrypted store
+        # at the moment of a re-sign-in. The password itself is still never
+        # held on the instance.
+        self._init_kwargs = {k: v for k, v in kwargs.items() if k != "password"}
+        self._credential_fn = credential_fn
+        self._expected_login = kwargs.get("login")
+        self._terminal_path = str(terminal_path) if terminal_path else None
+        try:
+            self._attached_login = int(getattr(mt5.account_info(), "login", 0) or 0) or None
+        except Exception:  # noqa: BLE001
+            self._attached_login = None
 
         # The profile is a PRIOR about this venue's behaviour -- symbol
         # spelling, minimum stop distance, filling mode, contract size. It is
@@ -359,6 +392,116 @@ class MT5Broker(Broker):
                     raise ConfigError(
                         f"the MT5 intent journal at {journal} is unreadable ({exc}); "
                         "restore it or move it aside deliberately") from exc
+
+    # -- terminal health (used by ops/terminal_watchdog.py) ------------------ #
+
+    @property
+    def via_bridge(self) -> bool:
+        return type(self._mt5).__name__ == "BridgeMT5"
+
+    def _error_text(self) -> str:
+        try:
+            err = self._mt5.last_error()
+            return f"{err[0]} {err[1]}"[:200]
+        except Exception:  # noqa: BLE001
+            return "unknown"
+
+    def health(self) -> Dict[str, Any]:
+        """What state the terminal is in, from the terminal's own answers.
+
+        ``state`` is one of ``ok``, ``terminal_down`` (not running, or not
+        answering), ``broker_disconnected`` (running, but no link to the
+        broker's server), ``not_logged_in`` and ``wrong_account``.
+        """
+        try:
+            ti = self._mt5.terminal_info()
+        except Exception as exc:  # noqa: BLE001
+            return {"state": "terminal_down", "detail": f"{type(exc).__name__}: {exc}"[:200]}
+        if ti is None:
+            return {"state": "terminal_down", "detail": self._error_text()}
+        if getattr(ti, "connected", True) is False:
+            return {"state": "broker_disconnected", "detail": "no connection to the trade server"}
+        try:
+            ai = self._mt5.account_info()
+        except Exception as exc:  # noqa: BLE001
+            return {"state": "terminal_down", "detail": f"{type(exc).__name__}: {exc}"[:200]}
+        if ai is None:
+            return {"state": "not_logged_in", "detail": self._error_text()}
+        expected = self._expected_login or self._attached_login
+        login = getattr(ai, "login", None)
+        if expected and login and int(login) != int(expected):
+            return {"state": "wrong_account",
+                    "detail": f"signed in to ...{str(login)[-3:]}, "
+                              f"expected ...{str(expected)[-3:]}"}
+        ping = getattr(ti, "ping_last", None)
+        return {"state": "ok", "algo_trading": bool(getattr(ti, "trade_allowed", True)),
+                "ping_ms": round(float(ping) / 1000.0, 1) if ping else None}
+
+    @property
+    def can_sign_in(self) -> bool:
+        return bool(self._expected_login and self._credential_fn is not None)
+
+    def reconnect(self) -> tuple:
+        """(ok, detail). Restart the session, starting the terminal if needed.
+
+        MetaTrader5.initialize() launches the terminal when it is not running.
+        With a stored credential it signs in to THIS service's account; without
+        one it attaches to whatever the terminal opens with.
+        """
+        try:
+            self._mt5.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        kwargs = dict(self._init_kwargs)
+        signed = False
+        if self.can_sign_in:
+            try:
+                password = self._credential_fn()
+            except Exception:  # noqa: BLE001 - an unreadable store falls back to attach
+                password = None
+            if password:
+                kwargs["password"] = password
+                signed = True
+            password = None
+        if not signed:
+            kwargs.pop("login", None)
+            kwargs.pop("server", None)
+        try:
+            ok = bool(self._mt5.initialize(**kwargs))
+        except Exception as exc:  # noqa: BLE001
+            return False, f"initialize raised {type(exc).__name__}"
+        finally:
+            kwargs.pop("password", None)
+        if not ok:
+            return False, f"initialize failed: {self._error_text()}"
+        ai = self._mt5.account_info()
+        if ai is None:
+            return False, "the terminal started but is not signed in"
+        expected = self._expected_login or self._attached_login
+        if expected and int(getattr(ai, "login", 0) or 0) != int(expected):
+            return False, "the terminal came back on a different account"
+        return True, "signed in again" if signed else "attached again"
+
+    def kill_terminal(self) -> tuple:
+        """(ok, detail). End the terminal process at OUR path, and only that one.
+
+        Only for a local Windows terminal whose path this service was given:
+        with several terminals on one machine, "terminal64.exe" alone does not
+        say which one is ours, and ending someone else's is not acceptable.
+        """
+        if self.via_bridge:
+            return False, "the terminal runs on the bridge host; restart it there"
+        import platform
+        if platform.system() != "Windows":
+            return False, "not a Windows host"
+        if not self._terminal_path:
+            return False, "no terminal path configured, so the process cannot be identified"
+        try:
+            pids = _end_terminal_process(self._terminal_path)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"could not end the process: {type(exc).__name__}: {exc}"[:200]
+        return (bool(pids), f"ended process {', '.join(map(str, pids))}" if pids
+                else "no running terminal at that path")
 
     # -- helpers ------------------------------------------------------------ #
 

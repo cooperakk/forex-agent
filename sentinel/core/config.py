@@ -603,6 +603,48 @@ class BrainConfig(StrictModel):
         return clean
 
 
+class MacroConfig(StrictModel):
+    """Cross-market context (sentinel/data/macro): the US dollar index and the
+    CFTC Commitments of Traders.
+
+    Both reach the agent in two ways. As FEATURES, they join every signal's
+    record, so the similar-situation memory and the meta-label filter learn
+    from them -- out of sample, with the owner's approval. As two shrink-only
+    RULES, each of which the brain's scorecard measures like any other layer:
+
+    * ``cot_crowding``: speculators are at a multi-year extreme on the side of
+      the trade (a crowded position unwinds violently: Brunnermeier, Nagel &
+      Pedersen 2008 find speculators' net futures positions predict currency
+      crash risk);
+    * ``dxy_headwind``: the trade is against a statistically strong move of
+      the dollar itself.
+
+    Outside the verdict's runtime policy for the same reason as the brain:
+    neither can enlarge a position or change a limit.
+    """
+
+    enabled: bool = True
+    dxy_enabled: bool = True
+    #: Bars of each DXY component the feed keeps up to date.
+    dxy_timeframe: Literal["M15", "M30", "H1", "H4"] = "H1"
+    dxy_history_bars: int = Field(3000, ge=200, le=50_000)
+    dxy_headwind_enabled: bool = True
+    #: Momentum score (20-bar return in units of its own noise) against the
+    #: trade that counts as a headwind.
+    dxy_headwind_score: float = Field(2.0, ge=0.5, le=6.0)
+    dxy_headwind_multiplier: float = Field(0.75, ge=0.0, le=1.0)
+
+    cot_enabled: bool = True
+    cot_refresh_hours: int = Field(12, ge=1, le=168)
+    #: Weekly reports the positioning index is ranked against (156 = 3 years).
+    cot_lookback_weeks: int = Field(156, ge=26, le=520)
+    cot_min_weeks: int = Field(52, ge=13, le=520)
+    cot_crowding_enabled: bool = True
+    #: Index (0..100) at or beyond which speculators count as crowded.
+    cot_extreme: float = Field(90.0, ge=60.0, le=100.0)
+    cot_crowding_multiplier: float = Field(0.75, ge=0.0, le=1.0)
+
+
 class ResearchConfig(StrictModel):
     """Numeric acceptance thresholds, fixed BEFORE any run (brief section D-2)."""
 
@@ -629,6 +671,31 @@ class ResearchConfig(StrictModel):
         if self.cpcv_test_groups >= self.cpcv_groups:
             raise ValueError("cpcv_test_groups must be < cpcv_groups")
         return self
+
+
+class TerminalWatchdogConfig(StrictModel):
+    """Keeps the MetaTrader 5 terminal open and signed in (ops/terminal_watchdog).
+
+    It can relaunch and re-sign-in the terminal, and -- only for a terminal at
+    the configured path that has stopped answering -- end that one process so
+    it can be started again. It never opens, modifies or closes a position:
+    open positions keep their stop-loss at the broker throughout, and new
+    entries stay blocked by the connectivity veto until the terminal is back
+    and the book has been reconciled.
+    """
+
+    enabled: bool = True
+    #: Unhealthy checks in a row before acting (one bad read is often a blip).
+    grace_checks: int = Field(2, ge=1, le=20)
+    #: First retry delay; doubles after each failed attempt, up to the cap.
+    backoff_initial_sec: int = Field(30, ge=5, le=3600)
+    backoff_max_sec: int = Field(600, ge=30, le=7200)
+    #: End a frozen terminal (same path only, local Windows only) after this
+    #: many failed reconnects. 0 = never.
+    kill_hung_after_failures: int = Field(3, ge=0, le=50)
+    #: Re-sign-in when the terminal is on ANOTHER account. Only ever with the
+    #: credentials this service was given; in attach mode it only alerts.
+    restore_account: bool = True
 
 
 class OpsConfig(StrictModel):
@@ -661,6 +728,7 @@ class OpsConfig(StrictModel):
                     "(risk/portfolio.py). Every engine of one owner should point "
                     "here; None means this engine is alone.",
     )
+    terminal_watchdog: TerminalWatchdogConfig = Field(default_factory=TerminalWatchdogConfig)
 
 
 class SecurityConfig(StrictModel):
@@ -783,6 +851,7 @@ class SentinelConfig(StrictModel):
     news: NewsConfig = Field(default_factory=NewsConfig)
     reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
     brain: BrainConfig = Field(default_factory=BrainConfig)
+    macro: MacroConfig = Field(default_factory=MacroConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)

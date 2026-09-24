@@ -9,6 +9,7 @@ import AIPage from "./pages/AIPage";
 import ReferencePage from "./pages/ReferencePage";
 import BrainPage from "./pages/BrainPage";
 import NotifyPage from "./pages/NotifyPage";
+import MacroPage from "./pages/MacroPage";
 import ManualTrade from "./pages/ManualTrade";
 import Audit from "./pages/Audit";
 import Brokers from "./pages/Brokers";
@@ -24,8 +25,8 @@ import Users from "./pages/Users";
 import type { Snapshot } from "./types";
 
 type Page = "overview" | "positions" | "manual" | "journal" | "risk" | "research" | "agent"
-  | "brain" | "ai" | "reference" | "notify" | "settings" | "brokers" | "users" | "licence"
-  | "audit" | "glossary";
+  | "brain" | "macro" | "ai" | "reference" | "notify" | "settings" | "brokers" | "users"
+  | "licence" | "audit" | "glossary";
 
 /* Nav labels are the first words a newcomer reads, so they say what the page
    shows rather than what the subsystem is called. */
@@ -38,6 +39,7 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "research", label: "آزمایش و اثبات", icon: "⬡" },
   { id: "agent", label: "تصمیم‌های ربات", icon: "◐" },
   { id: "brain", label: "مغز ربات (یادگیری)", icon: "✺" },
+  { id: "macro", label: "دلار و COT (بازار کلان)", icon: "$" },
   { id: "ai", label: "هوش مصنوعی و اخبار", icon: "✦" },
   { id: "reference", label: "قیمت مرجع (TradingView)", icon: "⚖" },
   { id: "notify", label: "اعلان‌ها (تلگرام و بله)", icon: "✉" },
@@ -213,6 +215,22 @@ export default function App() {
               </span>
             </span>
             <button className="btn ghost sm" onClick={refresh}>تازه‌سازی</button>
+            {s.kill_switch.engaged ? (
+              /* The API has always accepted a release (owner + second factor);
+                 the console had no button for it, so an owner whose robot the
+                 watchdog had stopped was told "release it from the dashboard"
+                 and found nothing to press. */
+              <button className="btn sm" disabled={readOnly || !canAdminister}
+                      title={!canAdminister ? "فقط مالک حساب" : undefined}
+                      onClick={() => setConfirm({
+                        action: "برداشتن توقف اضطراری",
+                        description: <>ربات از چرخهٔ بعد دوباره اجازه دارد معاملهٔ تازه باز کند
+                          (در حالت «فقط پیشنهاد» فقط پیشنهاد می‌دهد). اول مطمئن شوید علت توقف —
+                          که بالای صفحه نوشته شده — برطرف شده است. این کار در دفتر رویدادها ثبت
+                          می‌شود.</>,
+                        path: "/api/control/kill/release", body: {},
+                      })}>برداشتن توقف اضطراری</button>
+            ) : (
             <button className="btn danger sm" disabled={readOnly}
                     onClick={() => setConfirm({
                       action: "فعال کردن کلید توقف اضطراری",
@@ -223,6 +241,7 @@ export default function App() {
                       path: "/api/control/kill",
                       body: { reason: "engaged from the console" }, danger: true,
                     })}>توقف فوری همه‌چیز</button>
+            )}
           </div>
         </header>
 
@@ -238,11 +257,35 @@ export default function App() {
               </Banner>
             </div>
           )}
+          {s.kill_switch.engaged && page !== "overview" && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="neg" icon="■">
+                <strong>توقف اضطراری روشن است؛ معاملهٔ تازه باز نمی‌شود.</strong>{" "}
+                دلیل: <span className="ltr mono fs12">{s.kill_switch.reason || "—"}</span>
+                {s.kill_switch.engaged_by ? <> (توسط <span className="ltr">{s.kill_switch.engaged_by}</span>)</> : null}.
+                {" "}معامله‌های باز حد ضررشان را نزد بروکر دارند. این توقف خودکار برداشته نمی‌شود؛
+                وقتی علتش برطرف شد، مالک با دکمهٔ «برداشتن توقف اضطراری» (بالای صفحه) آن را
+                برمی‌دارد.
+                {(s.kill_switch.reason || "").includes("heartbeat") && <> «no heartbeat» یعنی موتور
+                  ربات مدتی جواب نداده بود؛ اگر روی ویندوز نسخهٔ ۱٫۷٫۰ یا ۱٫۸٫۰ نصب بوده، علتش
+                  ایرادی بود که در ۱٫۸٫۱ برطرف شده است.</>}
+              </Banner>
+            </div>
+          )}
           {s.entries_permitted && !s.entries_permitted.allowed && (
             <div style={{ marginBottom: 16 }}>
               <Banner tone="neg" icon="⬚">
                 <strong>معامله تازه با پول واقعی متوقف است.</strong>{" "}
                 {s.entries_permitted.reason} معامله‌های باز همچنان مدیریت و محافظت می‌شوند.
+              </Banner>
+            </div>
+          )}
+          {s.terminal && s.terminal.applicable && s.terminal.state !== "ok"
+            && s.terminal.state !== "unknown" && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="neg" icon="⇄">
+                <strong>متاتریدر: {s.terminal.state_fa}.</strong> نگهبان در حال برگرداندن اتصال
+                است؛ تا آن موقع معاملهٔ تازه باز نمی‌شود. جزئیات در «بروکر و اتصال».
               </Banner>
             </div>
           )}
@@ -283,6 +326,8 @@ export default function App() {
                                                   readOnly={readOnly}
                                                   canAdminister={canAdminister} />}
           {page === "brain" && <BrainPage provider={provider} write={write} readOnly={readOnly}
+                                          canAdminister={canAdminister} />}
+          {page === "macro" && <MacroPage provider={provider} write={write} readOnly={readOnly}
                                           canAdminister={canAdminister} />}
           {page === "notify" && <NotifyPage provider={provider} write={write} readOnly={readOnly}
                                             canAdminister={canAdminister} />}

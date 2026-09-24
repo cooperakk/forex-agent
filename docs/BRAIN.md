@@ -125,6 +125,18 @@ interval of their outcomes is below zero, the signal trades at
 signals before it has an opinion, and it has several times more observations
 than closed trades, because vetoed signals count too.
 
+## 7b. Macro layers (1.8.0)
+
+Two further shrink-only layers come from the macro desk:
+
+* `cot_crowding`: speculators are at a multi-year extreme on the side of the
+  trade;
+* `dxy_headwind`: the dollar is moving hard against the trade.
+
+Both are recorded in `brain_layers` and measured by the same scorecard. Their
+features join every shadow-book record and the lab's training rows, as of each
+row's own time. See [`MACRO-AND-WATCHDOG.md`](MACRO-AND-WATCHDOG.md).
+
 ## 8. Gap stress (`sentinel/risk/stress.py`)
 
 The sizing layer bounds each trade's loss at its stop. Gap stress asks a

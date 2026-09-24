@@ -25,7 +25,7 @@ out="$DEST_DIR/sentinel-state-$stamp.tar.gz"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-for db in verdicts.db memory.db market.db calendar.db users.db ai.db brain.db; do
+for db in verdicts.db memory.db market.db calendar.db users.db ai.db brain.db macro.db; do
     src="$STATE_DIR/var/$db"
     [ -f "$src" ] || src="$STATE_DIR/$db"
     [ -f "$src" ] || continue

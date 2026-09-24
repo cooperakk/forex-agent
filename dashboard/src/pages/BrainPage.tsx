@@ -29,6 +29,7 @@ const LAYER_FA: Record<string, string> = {
   drift: "افت عملکرد (CUSUM)", equity_curve: "منحنی سرمایه زیر میانگین",
   allocation: "شانس سود در این وضعیت بازار", similarity: "موقعیت‌های مشابه گذشته",
   meta_label: "فیلتر دوم (بگیرم یا نه)",
+  cot_crowding: "موقعیت شلوغ معامله‌گران بزرگ (COT)", dxy_headwind: "باد مخالف دلار (DXY)",
 };
 
 const STATUS_FA: Record<string, { label: string; tone: any }> = {

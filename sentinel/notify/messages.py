@@ -50,6 +50,18 @@ def _r(v: Any) -> str:
         return "—"
 
 
+def _dur(seconds: Any) -> str:
+    try:
+        sec = int(float(seconds))
+    except (TypeError, ValueError):
+        return "مدتی"
+    if sec < 120:
+        return f"{sec} ثانیه"
+    if sec < 7200:
+        return f"{round(sec / 60)} دقیقه"
+    return f"{round(sec / 3600, 1)} ساعت"
+
+
 def render(event: str, payload: Dict[str, Any], actor: str = "") -> Optional[Message]:
     p = payload or {}
     if event == "risk.halt":
@@ -176,6 +188,50 @@ def render(event: str, payload: Dict[str, Any], actor: str = "") -> Optional[Mes
         if p.get("retired"):
             return Message("learning", "model:off", "🧠 فیلتر «بگیرم یا نه» غیرفعال شد.")
         return None
+    if event == "ops.mt5_watchdog":
+        action, since = p.get("action"), p.get("since_ns", "")
+        if action == "down":
+            return Message("critical", f"mt5:down:{since}",
+                           f"⚠️ اتصال متاتریدر قطع شد: {_s(p.get('state_fa'))}.\nنگهبان در حال "
+                           "برگرداندن آن است. معامله‌های باز حد ضررشان را نزد بروکر دارند؛ "
+                           "تا برگشتن اتصال معاملهٔ تازه باز نمی‌شود.")
+        if action == "reconnected":
+            return Message("critical", f"mt5:up:{since}",
+                           f"✅ متاتریدر دوباره وصل شد، بعد از {_dur(p.get('down_sec'))}. دفتر "
+                           "ربات همین حالا با حساب بروکر تطبیق داده می‌شود.")
+        if action == "recovered":
+            return Message("critical", f"mt5:up:{since}",
+                           f"✅ اتصال متاتریدر خودش برگشت (بعد از {_dur(p.get('down_sec'))}).")
+        if action == "reconnect_failed":
+            return Message("critical", f"mt5:failed:{since}",
+                           f"⏳ متاتریدر هنوز برنگشته ({_s(p.get('detail'), 120)}). تلاش بعدی "
+                           f"{_dur(p.get('retry_in_sec'))} دیگر. اگر ادامه داشت، سرور را با "
+                           "ریموت دسکتاپ ببینید.")
+        if action == "killed":
+            return Message("critical", f"mt5:killed:{since}",
+                           "🔄 متاتریدر قفل کرده بود و جواب نمی‌داد؛ نگهبان همان برنامه را بست "
+                           "تا از نو باز شود.")
+        if action == "algo_off":
+            return Message("critical", "mt5:algo",
+                           "⚠️ دکمهٔ «Algo Trading» در متاتریدر خاموش است؛ ربات نمی‌تواند سفارش "
+                           "بفرستد. در نوار بالای متاتریدر روشنش کنید.")
+        if action == "algo_on":
+            return Message("critical", "mt5:algo:on", "✅ «Algo Trading» دوباره روشن است.")
+        return None
+    if event == "macro.cot":
+        rows = p.get("positions") or []
+        hi = float(p.get("extreme") or 90)
+        crowded = [r for r in rows if r.get("index") is not None
+                   and (r["index"] >= hi or r["index"] <= 100 - hi)]
+        lines = [f"📊 گزارش تازهٔ COT (موقعیت‌ها در {_s(p.get('report_date'))}):"]
+        for r in crowded[:8]:
+            side = "خریدِ شلوغ" if r["index"] >= hi else "فروشِ شلوغ"
+            lines.append(f"• {_s(r.get('currency'))}: شاخص {round(float(r['index']))} از ۱۰۰ "
+                         f"— {side}")
+        if not crowded:
+            lines.append("• هیچ ارزی در موقعیت شلوغ و افراطی نیست.")
+        lines.append("معامله‌ای که هم‌جهت با یک موقعیت شلوغ باشد، کوچک‌تر گرفته می‌شود.")
+        return Message("learning", f"cot:{p.get('report_date')}", "\n".join(lines))
     if event == "sec.write_denied":
         return Message("security", f"deny:{p.get('username')}:{p.get('reason')}",
                        f"🔐 یک تغییر رد شد: «{_s(p.get('action'))}» توسط "
