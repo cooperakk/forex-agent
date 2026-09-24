@@ -57,6 +57,7 @@ class NewsDesk:
         self.status = DeskStatus()
         self._articles: Dict[str, Article] = {}
         self._extractions: Dict[str, tuple] = {}     # article_id -> (ts_ns, Extraction)
+        self._jev: Dict[str, Dict[str, Any]] = {}    # article_id -> System One summary
         self._lock = threading.RLock()
 
     # -- the background step --------------------------------------------------- #
@@ -94,6 +95,7 @@ class NewsDesk:
                 ordered = sorted(self._articles.values(),
                                  key=lambda x: x.published_ns or 0, reverse=True)[:400]
                 self._articles = {a.article_id: a for a in ordered}
+                self._jev = {k: v for k, v in self._jev.items() if k in self._articles}
             self.status.articles_seen = len(self._articles)
         self._extract_new(now_ns)
 
@@ -118,25 +120,46 @@ class NewsDesk:
                        and not self.ai.store.has_extraction(a.article_id)]
         for article in pending[: self.max_extractions]:
             # A System One model (Jev) answers typed questions with
-            # probabilities when the owner put it first; otherwise, or if it
-            # fails, the text model writes a schema-checked extraction.
-            ex = self.ai.classify_news(article.article_id, article.title, article.summary,
-                                       article.currencies,
-                                       training_cutoff=self.training_cutoff)
-            if ex is None:
+            # probabilities when the owner put it first. What its answer may
+            # DO depends on its mode: in shadow (the default) it is recorded
+            # and shown and changes nothing; the text model, if there is one,
+            # feeds the filter and doubles as a second opinion to compare.
+            jev_ex = self.ai.classify_news(article.article_id, article.title,
+                                           article.summary, article.currencies,
+                                           training_cutoff=self.training_cutoff)
+            ex = self.ai.jev_policy_view(jev_ex) if jev_ex is not None else None
+            if ex is None and (jev_ex is None or self.ai.has_text_provider()):
                 ex = extractor.extract(article.article_id, article.title, article.summary,
                                        published_ns=article.published_ns)
+                if jev_ex is not None:
+                    try:
+                        self.ai.store.attach_text_opinion(article.article_id, ex.to_dict())
+                    except Exception:  # noqa: BLE001
+                        pass
+            if jev_ex is not None:
+                with self._lock:
+                    self._jev[article.article_id] = {
+                        "mode": self.ai.jev_mode(), "used": ex is not None and
+                        ex.model == jev_ex.model,
+                        "event_type": jev_ex.event_type,
+                        "direction": jev_ex.direction_claim,
+                        "confidence": jev_ex.confidence,
+                        **{v["name"]: v["value"] for v in jev_ex.numeric_values}}
+            record = ex if ex is not None else jev_ex
             # The source already tells us which currency it moves. A model that
             # lists none, or lists an unrelated one, is corrected towards the
             # source, never away from it.
-            if not ex.currencies:
-                ex.currencies = list(article.currencies)
-            with self._lock:
-                self._extractions[article.article_id] = (now_ns, ex)
+            if not record.currencies:
+                record.currencies = list(article.currencies)
+            if ex is not None:
+                with self._lock:
+                    self._extractions[article.article_id] = (now_ns, ex)
             try:
+                payload = record.to_dict()
+                payload["policy_use"] = ex is not None
                 self.ai.store.save_extraction(
                     article.article_id, article.published_ns, article.source,
-                    article.title, ex.to_dict())
+                    article.title, payload)
             except Exception:  # noqa: BLE001
                 pass
             self.status.extracted += 1
@@ -185,5 +208,8 @@ class NewsDesk:
                         "is_correction": ex.is_correction,
                         "contradicts_prior": ex.contradicts_prior,
                         "confidence": ex.confidence, "errors": ex.errors[:2]}
+                jev = self._jev.get(a.article_id)
+                if jev:
+                    row["jev"] = dict(jev)
                 rows.append(row)
         return rows

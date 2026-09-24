@@ -157,8 +157,14 @@ class Agent:
         news: Optional[NewsPolicy] = None,
         meta_gate: Any = None,
         entry_gate: Optional[Callable[[], tuple]] = None,
+        reference: Any = None,
     ) -> None:
         self.config = config
+        #: sentinel.data.reference.ReferenceGuard, or None. Compares the
+        #: broker's price with an independent reference; can only shrink or
+        #: block a new entry, and does nothing when the reference is absent.
+        self.reference = reference
+        self._reference_checks: Dict[str, Any] = {}
         #: ``() -> (allowed, reason)``, asked before any NEW live risk is opened
         #: (see entry_permission). Normally LicenseGate.may_trade_live.
         self.entry_gate = entry_gate
@@ -931,6 +937,25 @@ class Agent:
                 conversions.pop(inst.quote, None)
                 missing.append(inst.quote)
 
+        # The independent price check runs on the SAME quotes the entry will be
+        # priced from, so a manual ticket or an accepted proposal between two
+        # cycles is judged on its own snapshot, not the last cycle's.
+        if self.reference is not None and snap is not None and snap.quotes:
+            try:
+                fresh = self.reference.assess(now_ns, snap.quotes, instruments)
+                # Replace, never accumulate: a check the guard no longer
+                # returns (switched off, instrument unmapped) must not leave
+                # an old block standing.
+                for sym in snap.quotes:
+                    if sym in fresh:
+                        self._reference_checks[sym] = fresh[sym]
+                    else:
+                        self._reference_checks.pop(sym, None)
+            except Exception as exc:  # noqa: BLE001 - a reference fault changes nothing
+                self._reference_checks = {}
+                self.audit.append(EventType.CONNECTIVITY,
+                                  {"reference_check_failed": str(exc)[:200]})
+
         lifecycles = {a.name: a.lifecycle for a in cfg.strategies}
         normal_spreads: Dict[str, Decimal] = {}
         cost_models: Dict[str, CostModel] = {}
@@ -984,6 +1009,9 @@ class Agent:
             normal_spread_pips=normal_spreads, cost_models=cost_models,
             news_blackout={sym: "; ".join(a.reasons)[:180]
                            for sym, a in self._news_assessment.items() if a.blocked},
+            price_divergence={sym: c.reason[:240]
+                              for sym, c in self._reference_checks.items()
+                              if getattr(c, "blocked", False)},
             missing_conversions=sorted(set(missing)),
             blocking_alarms=list(blocking_alarms or []),
             correlations=dict(correlations or {}),
@@ -1844,6 +1872,12 @@ class Agent:
         if assessment is not None and assessment.size_multiplier < D("1"):
             caution = float(min(dec(caution), assessment.size_multiplier))
             reasons.extend(assessment.reasons[:2])
+        # A broker price that differs from the reference by more than the
+        # shrink threshold halves the size (a BLOCK is the risk engine's veto).
+        check = self._reference_checks.get(instrument)
+        if check is not None and getattr(check, "status", "") == "shrink":
+            caution = float(min(dec(caution), dec(check.size_multiplier)))
+            reasons.append(check.reason[:160])
         return max(0.0, min(1.0, float(caution))), reasons
 
     def entry_permission(self) -> tuple[bool, str]:

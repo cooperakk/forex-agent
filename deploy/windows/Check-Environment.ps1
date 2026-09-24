@@ -97,7 +97,10 @@ if (-not $Quick) {
         @("OpenAI API", "https://api.openai.com/", $false),
         @("Gemini API", "https://generativelanguage.googleapis.com/", $false),
         @("DeepSeek API", "https://api.deepseek.com/", $false),
-        @("Kimi (Moonshot) API", "https://api.moonshot.ai/", $false)
+        @("Kimi (Moonshot) API", "https://api.moonshot.ai/", $false),
+        @("Jev (TypeSafe) API", "https://api.typesafe.ai/", $false),
+        @("TradingView data (reference)", "https://data.tradingview.com/", $false),
+        @("TradingView scanner (ratings)", "https://scanner.tradingview.com/", $false)
     )
     foreach ($t in $targets) {
         $reached = $false
@@ -112,7 +115,8 @@ if (-not $Quick) {
         elseif ($t[2]) { Bad "$($t[0]) NOT reachable ($($t[1]))" }
         else { W "$($t[0]) not reachable -- only matters if you use it" }
     }
-    Hint "an unreachable news or AI endpoint only disables that feature; trading is unaffected"
+    Hint "an unreachable news, AI or TradingView endpoint only disables that feature; trading is unaffected"
+    Hint "full TradingView test (websocket + ratings): .venv\Scripts\python.exe scripts\tv_history.py --selftest"
 }
 
 Sec "Summary"

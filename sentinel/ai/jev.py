@@ -26,7 +26,7 @@ Design choices, and why:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..news.llm_extract import EXTRACTION_SCHEMA, Extraction
 
@@ -86,34 +86,63 @@ def build_questions() -> Dict[str, Dict[str, Any]]:
     return questions
 
 
-def _choice_probabilities(answer: Any, criteria: Dict[str, str]) -> Dict[str, float]:
-    """Probabilities keyed by OPTION KEY, whether the answer used keys or labels."""
+def _unit(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return x if 0.0 <= x <= 1.0 else None
+
+
+def _choice_probabilities(answer: Any, criteria: Dict[str, str]) -> Tuple[Dict[str, float], str]:
+    """(probabilities keyed by OPTION KEY, where the numbers came from).
+
+    The source is ``probabilities`` (a full distribution), ``confidence`` (the
+    chosen option's probability; the remainder is spread over the others), or
+    ``choice_only`` -- a bare pick with no number at all. A bare pick used to
+    be read as certainty (probability 1.0), which quietly satisfied every
+    confidence gate downstream; it is now recorded as a pick of UNKNOWN
+    confidence, and the extraction built from it cannot block anything.
+    """
     if not isinstance(answer, dict):
-        return {}
-    raw = answer.get("probabilities")
-    if not isinstance(raw, dict):
-        choice = answer.get("choice")
-        return {str(choice): 1.0} if choice in criteria else {}
+        return {}, "none"
     by_label = {label: key for key, label in criteria.items()}
-    out: Dict[str, float] = {}
-    for k, v in raw.items():
-        key = k if k in criteria else by_label.get(k)
-        if key is None:
-            continue
-        try:
-            out[key] = out.get(key, 0.0) + max(0.0, float(v))
-        except (TypeError, ValueError):
-            continue
-    total = sum(out.values())
-    return {k: v / total for k, v in out.items()} if total > 0 else {}
+    raw = answer.get("probabilities")
+    if isinstance(raw, dict):
+        out: Dict[str, float] = {}
+        for k, v in raw.items():
+            key = k if k in criteria else by_label.get(k)
+            p = _unit(v) if key is not None else None
+            if p is None:
+                continue
+            out[key] = out.get(key, 0.0) + p
+        total = sum(out.values())
+        if total > 0:
+            return {k: v / total for k, v in out.items()}, "probabilities"
+    choice = answer.get("choice")
+    key = choice if choice in criteria else by_label.get(choice) if isinstance(choice, str) \
+        else None
+    if key is None:
+        return {}, "none"
+    conf = _unit(answer.get("confidence"))
+    if conf is not None and len(criteria) > 1:
+        rest = (1.0 - conf) / (len(criteria) - 1)
+        return {k: (conf if k == key else rest) for k in criteria}, "confidence"
+    return {key: 1.0}, "choice_only"
 
 
-def _averaged(answers: Dict[str, Any], name: str, criteria: Dict[str, str]) -> Dict[str, float]:
-    parts = [p for p in (_choice_probabilities(answers.get(name), criteria),
-                         _choice_probabilities(answers.get(f"{name}_rev"), criteria)) if p]
-    if not parts:
-        return {}
-    return {k: sum(p.get(k, 0.0) for p in parts) / len(parts) for k in criteria}
+def _averaged(answers: Dict[str, Any], name: str,
+              criteria: Dict[str, str]) -> Tuple[Dict[str, float], bool]:
+    """The two orderings averaged, and whether every part carried a number."""
+    parts = [_choice_probabilities(answers.get(name), criteria),
+             _choice_probabilities(answers.get(f"{name}_rev"), criteria)]
+    usable = [p for p, _src in parts if p]
+    if not usable:
+        return {}, False
+    known = all(src in ("probabilities", "confidence") for p, src in parts if p)
+    return {k: sum(p.get(k, 0.0) for p in usable) / len(usable) for k in criteria}, known
 
 
 def _noul(answers: Dict[str, Any], name: str) -> Optional[float]:
@@ -130,8 +159,8 @@ def _noul(answers: Dict[str, Any], name: str) -> Optional[float]:
 def extraction_from_answers(article_id: str, headline: str, answers: Dict[str, Any], *,
                             model: str, currencies, latency_ms: float,
                             training_cutoff: str = "") -> Extraction:
-    events = _averaged(answers, "event_type", EVENT_TYPES)
-    directions = _averaged(answers, "direction", DIRECTIONS)
+    events, events_known = _averaged(answers, "event_type", EVENT_TYPES)
+    directions, directions_known = _averaged(answers, "direction", DIRECTIONS)
     errors = []
     if not events or not directions:
         errors.append("the System One answer is missing a classification")
@@ -142,9 +171,13 @@ def extraction_from_answers(article_id: str, headline: str, answers: Dict[str, A
         if value is None:
             errors.append(f"no probability for {name}")
     # Concentration of the two averaged distributions: how sure the model is
-    # about WHAT this item is. Used by the desk's block gate.
+    # about WHAT this item is. Used by the desk's block gate -- so it must be
+    # a number the model actually gave. A bare pick with no probability and
+    # no confidence is unknown confidence, recorded as 0: it can still be
+    # displayed and still shrink on a correction, but it cannot block.
+    confidence_known = events_known and directions_known
     confidence = (events.get(event, 0.0) + directions.get(direction, 0.0)) / 2.0 \
-        if events and directions else 0.0
+        if events and directions and confidence_known else 0.0
     ex = Extraction(
         article_id=article_id, event_type=event, currencies=list(currencies or []),
         direction_claim=direction,
@@ -153,7 +186,8 @@ def extraction_from_answers(article_id: str, headline: str, answers: Dict[str, A
         is_correction=(p["is_correction"] or 0.0) >= CORRECTION_THRESHOLD,
         contradicts_prior=(p["contradicts_prior"] or 0.0) >= CONTRADICTION_THRESHOLD,
         numeric_values=[{"name": f"p_{k}", "value": round(v, 4)}
-                        for k, v in p.items() if v is not None],
+                        for k, v in p.items() if v is not None]
+        + [{"name": "confidence_known", "value": 1 if confidence_known else 0}],
         evidence_quotes=[headline[:400]],
         confidence=round(confidence, 4), model=f"jev:{model}",
         model_cutoff=training_cutoff, prompt_version="jev-1", latency_ms=latency_ms,

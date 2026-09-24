@@ -94,6 +94,7 @@ class Runtime:
         self.ai = None           # sentinel.ai.AIService
         self.news_desk = None    # sentinel.news.desk.NewsDesk
         self.coach = None        # sentinel.ai.coach.TradeCoach
+        self.reference = None    # sentinel.data.reference.ReferenceDesk
         self._bg_thread: Optional[threading.Thread] = None
         self.background_errors: List[str] = []
         self.background_last_ns: int = 0
@@ -429,7 +430,8 @@ class Runtime:
             self._thread = threading.Thread(target=loop, name="agent-loop", daemon=True)
             self._thread.start()
 
-            if self.news_desk is not None or self.coach is not None:
+            if (self.news_desk is not None or self.coach is not None
+                    or self.reference is not None):
                 def background() -> None:
                     # First pass soon after start, then once a minute; each
                     # assistant decides for itself whether it is due.
@@ -446,7 +448,8 @@ class Runtime:
         """One pass of the news desk and the coach. Never takes the trading lock."""
         self.background_last_ns = wall_ns()
         for name, step in (("news", getattr(self.news_desk, "tick", None)),
-                           ("coach", getattr(self.coach, "tick", None))):
+                           ("coach", getattr(self.coach, "tick", None)),
+                           ("reference", getattr(self.reference, "tick", None))):
             if step is None:
                 continue
             try:
@@ -459,7 +462,40 @@ class Runtime:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=10)
+        if self.reference is not None:
+            self.reference.stop()
         self.agent.stop()
+
+    def reference_instruments(self) -> List[str]:
+        """What the reference stream follows: every instrument an enabled
+        strategy trades, every instrument with an open position, and every
+        instrument the owner mapped by hand (so a manual ticket is checked too)."""
+        out: List[str] = []
+        try:
+            out.extend(self.agent._active_instruments())
+        except Exception:  # noqa: BLE001
+            pass
+        # The agent's OWN book, not broker.positions(): this runs on the
+        # background worker, and a venue client (the MetaTrader5 package in
+        # particular) must only ever be driven from the decision thread.
+        try:
+            out.extend(list(getattr(self.agent, "_position_meta", {}) or {}))
+        except Exception:  # noqa: BLE001 - a dict resized mid-copy; next tick
+            pass
+        out.extend(self.agent.config.reference.symbol_map)
+        seen: List[str] = []
+        for inst in out:
+            if inst not in seen:
+                seen.append(inst)
+        return seen[:40]
+
+    def reference_view(self) -> Dict[str, Any]:
+        if self.reference is None:
+            return {"enabled": False, "available": False,
+                    "reason": "the reference service is not wired in this build"}
+        view = self.reference.view()
+        view["available"] = True
+        return view
 
     def run_cycle(self) -> CycleReport:
         with self._lock:
@@ -965,7 +1001,15 @@ class Runtime:
                 raise ValueError(f"refusing to promote {name!r} to accepted: {why}")
 
     def update_config(self, patch: Dict[str, Any], by: str,
-                      *, allow_privileged: Optional[set] = None) -> dict:
+                      *, allow_privileged: Optional[set] = None,
+                      replace: Optional[set] = None) -> dict:
+        """Merge ``patch`` into the configuration, validate it, save it.
+
+        Nested dictionaries MERGE, so a patch cannot delete a key from one --
+        except for the ``(section, key)`` pairs in ``replace``, whose value in
+        the patch replaces the stored one whole (a mapping the owner edits as a
+        table, where a removed row must actually disappear).
+        """
         with self._lock:
             current = self.agent.config
             data = current.model_dump(mode="json")
@@ -979,6 +1023,10 @@ class Runtime:
                 return dst
 
             merged = merge(data, patch)
+            for section, key in (replace or ()):
+                sub = patch.get(section)
+                if isinstance(sub, dict) and key in sub:
+                    merged[section][key] = sub[key]
             self._guard_privileged_fields(current, merged, allow=allow_privileged)
             merged["version"] = current.version + 1
             merged["updated_at_ns"] = wall_ns()

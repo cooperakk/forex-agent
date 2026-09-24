@@ -17,4 +17,5 @@ argon2-cffi==25.1.0
 python-jose[cryptography]==3.5.0
 pyotp==2.10.0
 httpx==0.28.1
+websockets==17.1
 python-multipart==0.0.26

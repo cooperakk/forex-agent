@@ -4,6 +4,7 @@ import {
   Banner, Card, Chip, ConfirmWrite, Disclosure, Empty, Field, KV, Switch, ago, dt,
 } from "../components/ui";
 import type { AIInsights, AIOverview, AIProviderRow } from "../types";
+import JevPanel from "./JevPanel";
 
 /* AI assistants and news. The first thing on the page is what the AI is NOT
    allowed to do, because "the robot uses ChatGPT" is exactly the sentence that
@@ -122,6 +123,11 @@ export default function AIPage({ provider, write, readOnly, canAdminister }: {
                       description: "ترتیب سرویس‌ها، کاربردها و سقف تعداد درخواست‌ها ذخیره می‌شود.",
                       path: "/api/ai/settings", body,
                     })} />
+
+      {(overview.providers ?? []).some((p) => p.id === "jev" && (p.enabled || p.key_stored)) && (
+        <JevPanel provider={provider} write={write} readOnly={readOnly}
+                  canAdminister={canAdminister} />
+      )}
 
       <div className="grid g-2-1">
         <Card title="گزارش روزانه بازار"

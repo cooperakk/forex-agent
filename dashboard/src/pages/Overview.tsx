@@ -338,6 +338,7 @@ export const VETO_FA: Record<string, string> = {
   clock_skew: "ساعت ما با بروکر جور نبود",
   spread: "فاصله قیمت خرید و فروش خیلی زیاد بود",
   news_blackout: "نزدیک یک خبر مهم اقتصادی بودیم",
+  reference_divergence: "قیمت بروکر با قیمت مرجع بازار نمی‌خواند",
   no_stop: "معامله حد ضرر نداشت", stop_too_tight: "حد ضرر خیلی نزدیک بود",
   stop_too_wide: "حد ضرر خیلی دور بود", stop_side: "حد ضرر سمت اشتباه گذاشته شده بود",
   reward_risk: "سود احتمالی به اندازه ریسکش نمی‌ارزید",

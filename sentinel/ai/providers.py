@@ -57,7 +57,37 @@ MAX_RESPONSE_CHARS = 24_000
 
 
 class ProviderError(RuntimeError):
-    """A provider call failed. The message never contains the API key."""
+    """A provider call failed. The message never contains the API key.
+
+    ``status`` is the HTTP status when the provider answered with one, so the
+    service can tell "slow down" (429/529) from "broken" without parsing text.
+    """
+
+    def __init__(self, message: str, *, status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+#: Characters a served model/version id may contain when it is recorded.
+_SERVED_MODEL_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                          "0123456789._:-@/+")
+
+
+def served_model_id(data: Any) -> str:
+    """The model/version the provider SAYS answered, or "" when it did not say.
+
+    Read from the response body (``model``, ``model_version`` or ``version``).
+    Validated before it is stored or journalled: it is text from the network.
+    """
+    if not isinstance(data, dict):
+        return ""
+    for key in ("model_version", "model", "version"):
+        value = data.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+            if 0 < len(value) <= 80 and set(value) <= _SERVED_MODEL_CHARS:
+                return value
+    return ""
 
 
 @dataclass(frozen=True)
@@ -292,11 +322,14 @@ class ProviderClient:
 
     def system_one(self, state: Dict[str, Any], questions: Dict[str, Dict[str, Any]],
                    *, timeout: float = 20.0) -> tuple:
-        """(answers, usage, latency_ms) from a System One model (Jev).
+        """(answers, usage, latency_ms, served_model) from a System One model (Jev).
 
         ``questions`` maps an id to ``{"type": "choice"|"noul"|"score",
         "instructions": ..., "criteria": {...}}``. Ids stay in code; the model
         only sees each question's own text, so each must be self-contained.
+        ``served_model`` is the version the provider reports having used ("" if
+        it reports none) -- the thing a floating alias like ``jev-latest``
+        hides, and the thing the calibration is only valid for.
         """
         import json as _json
         if self.config.spec().kind != "typesafe":
@@ -316,7 +349,8 @@ class ProviderClient:
             raise ProviderError("the provider answered with a redirect, which is not "
                                 "followed (it would carry the API key elsewhere)")
         if status >= 400:
-            raise ProviderError(_redact(f"HTTP {status}: {text}", self.api_key))
+            raise ProviderError(_redact(f"HTTP {status}: {text}", self.api_key),
+                                status=status)
         try:
             data = _json.loads(text)
         except ValueError:
@@ -325,7 +359,9 @@ class ProviderClient:
         if not isinstance(answers, dict):
             raise ProviderError("the System One answer has no `answers` object")
         usage = data.get("usage") or {}
-        return answers, usage, round(latency, 1)
+        if not isinstance(usage, dict):
+            usage = {}
+        return answers, usage, round(latency, 1), served_model_id(data)
 
     def complete(self, system: str, user: str, *, max_tokens: int = 800,
                  json_mode: bool = False, timeout: float = 20.0) -> AIResult:
@@ -346,7 +382,8 @@ class ProviderClient:
             raise ProviderError("the provider answered with a redirect, which is not "
                                 "followed (it would carry the API key elsewhere)")
         if status >= 400:
-            raise ProviderError(_redact(f"HTTP {status}: {text}", self.api_key))
+            raise ProviderError(_redact(f"HTTP {status}: {text}", self.api_key),
+                                status=status)
         try:
             data = _json.loads(text)
         except ValueError:
@@ -380,7 +417,8 @@ class ProviderClient:
             raise ProviderError(_redact(f"{type(exc).__name__}: {exc}", self.api_key)) \
                 from None
         if status >= 400:
-            raise ProviderError(_redact(f"HTTP {status}: {text}", self.api_key))
+            raise ProviderError(_redact(f"HTTP {status}: {text}", self.api_key),
+                                status=status)
         try:
             data = _json.loads(text)
         except ValueError:
