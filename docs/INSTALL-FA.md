@@ -83,11 +83,20 @@ deploy\windows\Check-Environment.cmd
 داشبورد و دسترسی اینترنت به منابع لازم را چک می‌کند: خبرها، سرویس‌های هوش
 مصنوعی، Jev و TradingView.
 
-اگر گفت ساعت هماهنگ نیست، در PowerShell (با دسترسی Administrator) بزنید:
-```powershell
-w32tm /config /syncfromflags:manual /manualpeerlist:time.windows.com /update
-w32tm /resync
+اگر گفت ساعت هماهنگ نیست (یا در نصب نوشت `clock  Local CMOS Clock`)، در Command Prompt
+(با Run as administrator) این خط‌ها را یکی‌یکی بزنید:
 ```
+sc config w32time start= auto
+net start w32time
+w32tm /config /manualpeerlist:"time.windows.com,0x9 pool.ntp.org,0x9" /syncfromflags:manual /reliable:no /update
+net stop w32time
+net start w32time
+w32tm /resync /rediscover
+w32tm /query /status
+```
+در خروجی دستور آخر، جلوی `Source:` باید `time.windows.com` یا `pool.ntp.org` باشد، نه
+`Local CMOS Clock`. راه بدون دستور: Settings ← Time & language ← Date & time ← **Set
+time automatically** روشن ← **Sync now**.
 
 ### قدم ۳: نصب
 روی `deploy\windows\Install.cmd` راست‌کلیک کنید و **Run as administrator** را

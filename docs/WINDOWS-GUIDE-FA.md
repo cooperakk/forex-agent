@@ -21,12 +21,25 @@
 **ساعت کامپیوتر باید دقیق باشد.** ربات با ساعت کار می‌کند. یک بار این کار را بکنید:
 1. دکمه‌ی Start را بزنید، بنویسید `cmd`، روی **Command Prompt** راست‌کلیک کنید و
    **Run as administrator** را بزنید.
-2. این دو خط را یکی‌یکی کپی کنید و Enter بزنید:
+2. این خط‌ها را **یکی‌یکی** کپی کنید و بعد از هر کدام Enter بزنید:
 ```
-w32tm /config /syncfromflags:manual /manualpeerlist:time.windows.com /update
-w32tm /resync
+sc config w32time start= auto
+net start w32time
+w32tm /config /manualpeerlist:"time.windows.com,0x9 pool.ntp.org,0x9" /syncfromflags:manual /reliable:no /update
+net stop w32time
+net start w32time
+w32tm /resync /rediscover
+w32tm /query /status
 ```
-**چه باید ببینید:** «The command completed successfully».
+**چه باید ببینید:** در خروجی دستور آخر، جلوی `Source:` باید `time.windows.com` یا
+`pool.ntp.org` نوشته شده باشد — **نه** `Local CMOS Clock`.
+
+- اگر `net start w32time` گفت «already been started»، اشکالی ندارد؛ ادامه دهید.
+- اگر هنوز `Local CMOS Clock` بود: یک دقیقه صبر کنید و دو دستور آخر را دوباره بزنید.
+  باز هم نشد؟ یعنی اینترنت یا فایروال جلوی ساعت اینترنتی (پورت UDP 123) را گرفته؛
+  فیلترشکن/فایروال را بررسی کنید.
+- **راه ساده‌تر (بدون دستور):** Settings ← Time & language ← Date & time ← گزینه‌ی
+  **Set time automatically** را روشن کنید و **Sync now** را بزنید.
 
 ---
 
