@@ -248,7 +248,9 @@ def parse_feed(feed: Feed, raw: bytes, *, limit: int = 30) -> List[Article]:
     if b"<!doctype" in lowered or b"<!entity" in lowered:
         raise FeedError(f"{feed.id}: the document declares a DTD/entity and is refused")
     try:
-        root = ET.fromstring(raw)
+        # Entity expansion and external entities both need a DTD, which is
+        # refused above before the parser sees a byte of the document.
+        root = ET.fromstring(raw)  # noqa: S314
     except ET.ParseError as exc:
         raise FeedError(f"{feed.id}: not valid XML ({exc})") from exc
     atom = "{http://www.w3.org/2005/Atom}"

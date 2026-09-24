@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import threading
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 from ..core.clock import wall_ns
 from ..core.errors import BrokerError, ConfigError, ConversionMissingError, UnknownOutcomeError
@@ -38,6 +38,9 @@ from ..core.types import (
     Position, Quote, Side,
 )
 from .base import Broker, BrokerCapabilities, SubmitResult
+
+if TYPE_CHECKING:  # the annotation on MT5Broker.__init__
+    from .profiles.base import BrokerProfile
 
 _BLACKOUT_NS = 30 * 1_000_000_000
 #: How hard to try before refusing to build an adapter with no symbol table.

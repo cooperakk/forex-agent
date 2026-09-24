@@ -22,7 +22,7 @@ from sentinel.agent.memory import MemoryStore
 from sentinel.agent.orchestrator import Agent
 from sentinel.agent.proposals import ProposalQueue
 from sentinel.ai import AIService
-from sentinel.ai.coach import TradeCoach, generate_brief, validate_review
+from sentinel.ai.coach import TradeCoach, validate_review
 from sentinel.ai.providers import (
     ProviderClient, ProviderConfig, ProviderError, validate_base_url,
 )

@@ -24,8 +24,7 @@ from sentinel.api.state import Runtime
 from sentinel.brokers.paper import PaperBroker, SimProfile
 from sentinel.core.audit import AuditLog
 from sentinel.core.config import (
-    AgentConfig, AgentMode, ExecutionConfig, ExecutionVenueMode, OpsConfig, SecurityConfig,
-    SentinelConfig,
+    AgentConfig, AgentMode, ExecutionConfig, ExecutionVenueMode, OpsConfig, SentinelConfig,
 )
 from sentinel.core.money import Instrument
 from sentinel.core.types import Quote, Side
@@ -319,7 +318,7 @@ class TestApi:
         assert "cannot be changed" in r.text
 
     def test_a_manual_close_does_not_leave_a_phantom(self, system):
-        agent, broker = system["agent"], system["broker"]
+        agent = system["agent"]
         _approve_everything(agent, lots=D("0.10"))
         agent._advisory_queue.append(_queued())
         agent.accept_advice("C1", "owner")

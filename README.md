@@ -8,7 +8,7 @@
 *An autonomous FX trading agent built around capital preservation,
 statistical honesty, and a tamper-evident audit trail.*
 
-`Python 3.11+` · `FastAPI` · `React + TypeScript` · `958 tests`
+`Python 3.11+` · `FastAPI` · `React + TypeScript` · `1080 tests`
 
 </div>
 
@@ -87,7 +87,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt   # runtime + test deps
 cd dashboard && npm ci && npm run build && cd ..
 
-.venv/bin/python -m pytest -q        # انتظار: 958 passed (+2 permission tests that need POSIX)
+.venv/bin/python -m pytest -q        # انتظار: 1078 passed (+2 platform-specific skips)
 
 cp .env.example .env && chmod 600 .env
 python -c "import secrets; print(secrets.token_urlsafe(48))"   # SENTINEL_JWT_SECRET
@@ -189,11 +189,41 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | وقتی چیزی خراب شد چه کنید |
 | [`docs/LICENSING.md`](docs/LICENSING.md) | سامانه لایسنس، و مرزهای واقعی محافظت |
 | [`docs/BROKERS.md`](docs/BROKERS.md) | بروکرها: AMarkets، آلپاری، و هر بروکر متاتریدر |
+| [`docs/WINDOWS-SERVER.md`](docs/WINDOWS-SERVER.md) | Windows Server installation and operations |
+| [`docs/AI-PROVIDERS.md`](docs/AI-PROVIDERS.md) | AI providers, keys, and what a model may do |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 
 ---
 ---
 
 ## English
+
+### What's new in 1.5.0
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full list. In short:
+
+* **Audit fixes** -- accepting a proposal no longer discards the agent's
+  shrinkage; the licence is re-checked every cycle; the rolling 24 h loss
+  window is real and survives restarts; the API no longer freezes (kill switch
+  included) behind a slow broker; the Linux installer runs (it shipped with
+  CRLF line endings) and picks Python 3.11+.
+* **Licensing** -- embedded vendor key, required signed manifest, online
+  activation leases with revocation and seat limits
+  (`scripts/license_server.py`), and native-compiled protected builds
+  (`scripts/build_protected.py`). See [`docs/LICENSING.md`](docs/LICENSING.md).
+* **AI assistants** -- Claude, ChatGPT, Gemini, DeepSeek, Kimi or any
+  OpenAI-compatible endpoint, with sealed write-only keys, fallbacks and
+  budgets. Used for official-news filtering (shrink/block only), a trade coach
+  that explains every closed trade in Persian, and a daily brief. A model can
+  never open or enlarge a position. See [`docs/AI-PROVIDERS.md`](docs/AI-PROVIDERS.md).
+* **Live news** -- a confirmed economic calendar and official central-bank
+  feeds, so news blackout windows actually close.
+* **Manual trading** -- a ticket with a mandatory stop, sized by the risk budget
+  and judged by every veto, with a read-only preview. Real money is off until
+  the owner enables it.
+* **Windows Server** -- installer, supervisor, environment check, diagnostics,
+  kill switch, backup, update with rollback. See
+  [`docs/WINDOWS-SERVER.md`](docs/WINDOWS-SERVER.md).
 
 ### What this is
 
@@ -210,7 +240,7 @@ result and is left in place deliberately.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   # runtime + test deps
 cd dashboard && npm ci && npm run build && cd ..
-.venv/bin/python -m pytest -q          # 958 passed (+2 POSIX-only permission tests)
+.venv/bin/python -m pytest -q          # 1078 passed (+2 platform-specific skips)
 cp .env.example .env && chmod 600 .env && $EDITOR .env
 set -a && . ./.env && set +a && .venv/bin/python scripts/serve.py
 ```
@@ -246,12 +276,13 @@ scripts/       serve · run_acceptance · run_paper_sim · manage_users ·
 deploy/        systemd units · nginx · backup ·
                scripts/ (install, update, restore, healthcheck, uninstall)
 docs/          architecture · security · acceptance protocol · deployment
-tests/         958 tests, including a regression for every audit finding
+tests/         1080 tests, including a regression for every audit finding
 ```
 
 ### Commands
 
 ```bash
+./deploy/scripts/check-environment.sh  # can this machine run it? (read-only)
 sudo ./deploy/scripts/install.sh     # one-command server install
 sudo ./deploy/scripts/activate-licensing.sh  # switch licence enforcement ON
 sudo ./deploy/scripts/healthcheck.sh # is everything actually working?

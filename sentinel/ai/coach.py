@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..news.llm_extract import parse_response
 
