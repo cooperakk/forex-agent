@@ -35,6 +35,7 @@ code { background: var(--code); padding: 1px 6px; border-radius: 6px; font-size:
 pre { background: var(--code); padding: 12px 14px; border-radius: 10px; overflow-x: auto;
       text-align: left; line-height: 1.6; }
 pre code { background: none; padding: 0; }
+:not(pre) > code { overflow-wrap: anywhere; }   /* long Windows paths on a phone */
 table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: .95rem;
         display: block; overflow-x: auto; }
 th, td { border: 1px solid var(--line); padding: 8px 10px; vertical-align: top;
