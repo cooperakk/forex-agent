@@ -207,6 +207,9 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
   on the dashboard (never traded), and `scripts/tv_history.py` downloads
   research history. Off by default -- the interface is unofficial. See
   [`docs/TRADINGVIEW.md`](docs/TRADINGVIEW.md).
+* **Jev earns its authority** -- shadow mode by default, a version guard, a
+  calibration report with owner labels, and evidence required before it may
+  block anything. See [`docs/AI-PROVIDERS.md`](docs/AI-PROVIDERS.md).
 
 ### What's new in 1.5.0
 

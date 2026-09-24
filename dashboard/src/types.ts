@@ -352,3 +352,38 @@ export interface ReferenceView {
   ta?: Record<string, Record<string, TARating>>;
   ta_last_ns?: number; ta_error?: string; last_tick_ns?: number;
 }
+
+/* The System One model (Jev): authority, versions, calibration. */
+export interface CalibrationSummary {
+  n: number; positives: number; brier: number | null; base_rate_brier: number | null;
+  skill: number | null; auc: number | null;
+  reliability: { lo: number; hi: number; n: number; mean_p: number | null;
+                 observed: number | null }[];
+  decision: { threshold: number; n: number; true_positive: number; false_positive: number;
+              false_negative: number; true_negative: number; accuracy: number | null };
+}
+
+export interface JevAnswer {
+  article_id: string; ts_ns: number; version: string; mode: string; headline: string;
+  currencies: string; event_type: string; direction: string; confidence: number;
+  confidence_known: boolean; p_correction: number | null; p_contradiction: number | null;
+  label_correction: boolean | null; label_contradiction: boolean | null;
+  label_direction: string | null; text_opinion: Record<string, any> | null;
+}
+
+export interface JevReport {
+  mode: "shadow" | "shrink_only" | "active"; modes: string[];
+  known_version: string; known_since_ns: number; pending_version: string;
+  pending_since_ns: number; floating_alias: boolean; answers: number; labelled: number;
+  correction: CalibrationSummary; contradiction: CalibrationSummary;
+  direction: { n: number; accuracy: number | null; mean_confidence: number | null };
+  agreement_with_text_model: { n: number; correction: number | null;
+                               contradiction: number | null; direction: number | null };
+  gate: { passed: boolean; missing: string[]; min_labels: number;
+          contradiction_accuracy: number; correction_accuracy: number };
+  versions: { version: string; n: number; first_ns: number; last_ns: number;
+              labelled: number }[];
+  breaker: null | { open: boolean; seconds_left: number; failures: number;
+                    last_status: number | null };
+  recent: JevAnswer[];
+}

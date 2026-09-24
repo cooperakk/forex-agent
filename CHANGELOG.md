@@ -31,6 +31,27 @@
 Off by default. The interface is unofficial; TradingView's terms restrict
 automated access, and the owner decides whether to enable it.
 
+### Changed -- Jev earns its authority
+
+- **Shadow mode by default.** Jev's news classifications are recorded and
+  shown but change nothing until the owner promotes it to `shrink_only` (can
+  halve size, cannot block) or `active` (can also block). In shadow, a
+  configured text model feeds the filter and both opinions are compared.
+- **`active` requires evidence** on the answering version: 20 owner-labelled
+  headlines, >= 90% decision accuracy on contradictions and >= 85% on
+  corrections. The dashboard reports reliability bands, Brier score, skill
+  against the base rate and AUC (`sentinel/ai/calibration.py`).
+- **Version guard.** The served model version is read from every answer and
+  journalled; a change demotes Jev to shadow until the owner accepts the new
+  version, whose calibration starts from zero.
+- **Fixed: a bare pick was read as certainty.** An answer without a
+  probability distribution now uses its stated `confidence`, or is recorded as
+  unknown confidence and cannot block.
+- **Rate-limit breaker** for every provider: 429/529 back off 1 min -> 1 h with
+  no traffic, cleared by the next success.
+- API: `GET /api/ai/jev`, `POST /api/ai/jev/mode`, `POST /api/ai/jev/labels`
+  (batch, one code), `POST /api/ai/jev/accept-version`.
+
 ## 1.5.0 -- 2026-09-24
 
 An end-to-end audit of 1.4.0 followed by the features the owner asked for.

@@ -105,6 +105,22 @@ class AIProviderRef(BaseModel):
     provider: str = Field(min_length=2, max_length=20)
 
 
+class JevModeSave(BaseModel):
+    mode: str = Field(pattern=r"^(shadow|shrink_only|active)$")
+
+
+class JevLabel(BaseModel):
+    article_id: str = Field(min_length=1, max_length=200)
+    is_correction: Optional[bool] = None
+    contradicts_prior: Optional[bool] = None
+    direction: Optional[str] = Field(default=None,
+                                     pattern=r"^(hawkish|dovish|neutral|unclear)$")
+
+
+class JevLabels(BaseModel):
+    labels: List[JevLabel] = Field(min_length=1, max_length=100)
+
+
 class ReferenceSave(BaseModel):
     """The independent reference price (TradingView). Every field is optional;
     ``symbol_map``, when sent, REPLACES the stored mapping."""
@@ -1078,6 +1094,41 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
             return generate_brief(ai, runtime)
         except ValueError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:300])
+
+    # -- the System One model: authority, versions, calibration ----------------- #
+
+    @app.get("/api/ai/jev")
+    def ai_jev(session: Session = Depends(current_session)):
+        return _ai_or_409().jev_report()
+
+    @app.post("/api/ai/jev/mode")
+    def ai_jev_mode(body: JevModeSave,
+                    session: Session = Depends(require_write("ai_jev_mode",
+                                                             requires_owner=True))):
+        try:
+            return _ai_or_409().set_jev_mode(body.mode, session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:400])
+
+    @app.post("/api/ai/jev/accept-version")
+    def ai_jev_accept(session: Session = Depends(require_write("ai_jev_version",
+                                                               requires_owner=True))):
+        try:
+            return _ai_or_409().accept_jev_version(session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:400])
+
+    @app.post("/api/ai/jev/labels")
+    def ai_jev_labels(body: JevLabels,
+                      session: Session = Depends(require_write("ai_jev_labels",
+                                                               requires_owner=True))):
+        # One second-factor code for a whole batch: codes are single-use, and
+        # labelling twenty headlines one code at a time is how nobody labels.
+        try:
+            return _ai_or_409().save_jev_labels(
+                [lab.model_dump() for lab in body.labels], session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:300])
 
     @app.post("/api/news/refresh")
     def news_refresh(session: Session = Depends(require_write("news_refresh"))):

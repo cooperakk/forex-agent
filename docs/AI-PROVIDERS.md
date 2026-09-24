@@ -29,7 +29,7 @@ never treated as evidence.
 | `jev` | Jev (TypeSafe AI) | System One (`POST /v1/systemone`) | `jev-latest` | the TypeSafe console |
 | `custom` | Any OpenAI-compatible server | OpenAI-compatible | -- | e.g. Qwen, Grok, OpenRouter, or a local model at `http://127.0.0.1:.../v1` |
 
-### Jev is used differently
+### Jev is used differently -- and earns its authority
 
 Jev (TypeSafe AI, released September 2026) is a "System One" model: it does not
 write text, it answers typed questions -- pick one option, or the probability a
@@ -42,12 +42,51 @@ desk asks it:
   averaged, which cancels the model's preference for options listed first;
 * four Nouls: correction, revision, contradiction, scheduled.
 
-A contradiction is flagged only at probability >= 0.75 (a correction at 0.6),
-and the desk still honours a contradiction block only while fresh and
-confident. Nothing is generated, so nothing can be fabricated; the headline it
-classified is recorded as the evidence. If Jev fails, the next text model in
-the chain produces the extraction instead. The coach and the brief need prose,
-so they always skip Jev.
+Nothing is generated, so nothing can be fabricated; the headline it classified
+is recorded as the evidence. The coach and the brief need prose, so they always
+skip Jev.
+
+**Operating modes.** What Jev's answer may DO is a separate, owner-controlled
+setting (dashboard -> هوش مصنوعی و اخبار -> Jev panel, owner + second factor):
+
+| Mode | Effect |
+|---|---|
+| `shadow` (default) | Asked, recorded, shown. **No effect on trading.** If a text model is configured it feeds the filter instead, and both opinions are stored and compared. |
+| `shrink_only` | A correction (p >= 0.6) halves size for that currency's pairs. Nothing can block. |
+| `active` | Corrections shrink; a contradiction (p >= 0.75, confidence >= 0.6, fresh) blocks the currency for up to 4 h. **Requires evidence** (below). |
+
+**Evidence before authority.** `active` is refused until, on the version that
+is answering now, the owner has labelled at least 20 headlines ("was it really a
+correction / a contradiction?") and Jev's decisions at their thresholds were
+right on at least 90% (contradiction) and 85% (correction) of them. Labels are
+saved as a batch under one second-factor code. The panel shows, per flag:
+reliability bands (said 0.8 -> happened how often?), the Brier score, the
+**skill** against always answering the base rate, and the AUC. Skill and AUC
+are the numbers that matter: a model that answers 0.5 to every coin flip is
+perfectly calibrated and knows nothing.
+
+**Version guard.** Every answer records the version the service says served
+it (`model` / `model_version` in the response; the configured name if none is
+reported). The thresholds and labels were earned on one version, and a floating
+alias such as `jev-latest` can change underneath them. When a different version
+answers, Jev drops to `shadow` at once, the change is journalled, and it stays
+there until the owner accepts the new version -- whose calibration then starts
+from its own answers only.
+
+**Confidence is a number the model gave, or it is unknown.** If an answer
+carries neither a probability distribution nor a `confidence`, the pick is
+recorded with unknown confidence (0): it is shown and may still shrink on a
+correction, but it can never satisfy the block's confidence gate. (Before
+1.6.0 a bare pick was read as certainty.)
+
+**Rate-limit breaker.** A 429 or 529 from any provider opens a breaker for that
+provider: no traffic for 1 minute, doubling on each repeat up to 1 hour, closed
+by the next success. Skipped calls do not consume the call budget. A retry loop
+against a rate limit is how keys get suspended.
+
+If Jev fails, is backing off, or is in shadow, the next text model in the chain
+produces the extraction; with no text model the confirmed calendar still
+creates the blackout windows.
 
 Model names change often. After saving a key, press **Test connection** on the
 dashboard: it makes a tiny call and lists the models the provider actually
