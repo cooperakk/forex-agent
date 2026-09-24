@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up Sentinel-FX state every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:05:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=sentinel-backup.service
+
+[Install]
+WantedBy=timers.target

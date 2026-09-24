@@ -1,0 +1,104 @@
+# Sentinel-FX -- single-host deployment.
+#
+# Read docs/DEPLOYMENT.md before the first `up`. Two things in here are
+# load-bearing and are easy to "tidy" into a breach:
+#
+#   1. The published port is bound to 127.0.0.1. A dashboard with trading
+#      authority on an open port is equivalent to publishing the account.
+#      Reach it over an SSH tunnel or put an authenticating reverse proxy in
+#      front of it. Do not change this to "8088:8088".
+#   2. The named volume is the system's memory: the audit chain, the verdict
+#      registry, the equity peak and the period baselines. Delete it and the
+#      drawdown ladder forgets it was ever in drawdown.
+
+services:
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sentinel-fx:1.3.0
+    container_name: sentinel-engine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8088:8088"
+    env_file:
+      - .env
+    environment:
+      SENTINEL_CONFIG: /data/config.json
+      # The app refuses to bind beyond loopback unless this is set. Inside a
+      # container the bind is 0.0.0.0 by necessity; the isolation is provided
+      # by the port mapping above, which is why that line matters.
+      # Inside a container the bind must be 0.0.0.0; the isolation comes from
+      # the 127.0.0.1 port mapping above, which is why that line matters.
+      SENTINEL_ALLOW_PUBLIC_BIND: "1"
+      SENTINEL_BIND_HOST: "0.0.0.0"
+      TZ: UTC
+    volumes:
+      - sentinel-data:/data
+    # A trading process that can rewrite its own code is a trading process an
+    # attacker can rewrite. Everything mutable lives in the volume.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ulimits:
+      nofile: 8192
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    # Liveness only: /api/health requires auth, so 401 proves the process is
+    # serving. A wedged decision loop is the watchdog's job, not this probe's.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import httpx,sys; r=httpx.get('http://127.0.0.1:8088/api/health', timeout=4); sys.exit(0 if r.status_code < 500 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # An out-of-process watchdog. The in-process dead-man switch catches a hung
+  # decision loop; this catches a process that is gone entirely, including the
+  # case where the container is up but the loop died silently.
+  watchdog:
+    image: sentinel-fx:1.3.0
+    container_name: sentinel-watchdog
+    restart: unless-stopped
+    depends_on:
+      engine:
+        condition: service_started
+    # NO env_file. The watchdog needs neither the JWT secret, nor the admin
+    # password, nor the broker credentials -- and every variable handed to a
+    # container is visible in `docker inspect`.
+    environment:
+      SENTINEL_CONFIG: /data/config.json
+      TZ: UTC
+    volumes:
+      - sentinel-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    entrypoint: ["/usr/bin/tini", "--"]
+    # It watches the heartbeat FILE, not an HTTP endpoint. The API can answer
+    # perfectly while the decision loop is wedged; the heartbeat only advances
+    # when a cycle completes, which is the thing that actually matters.
+    command: ["python", "-m", "sentinel.ops.watchdog",
+              "--heartbeat", "/data/var/heartbeat.json",
+              "--kill-file", "/data/var/KILL",
+              "--audit", "/data/var/watchdog.jsonl",
+              "--poll", "5"]
+    # --timeout and --action are deliberately NOT pinned here: the watchdog
+    # reads ops.deadman_timeout_sec and ops.deadman_action from the config, so
+    # they are settings the operator can change rather than dead fields.
+
+volumes:
+  sentinel-data:
+    driver: local

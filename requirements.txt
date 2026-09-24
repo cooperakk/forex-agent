@@ -1,0 +1,20 @@
+# Pinned to the versions this build was tested against (2026-09).
+# `pip install -e .` resolves the same set with looser bounds.
+#
+# TO RUN THE TESTS you also need requirements-dev.txt:
+#     pip install -r requirements-dev.txt
+# This file is the RUNTIME set only, so a production install carries no test
+# framework -- but `pip install -r requirements.txt && pytest` is the obvious
+# first thing to try, and it fails with "No module named pytest".
+fastapi==0.141.1
+uvicorn[standard]==0.46.0
+pydantic==2.13.3
+numpy==2.4.4
+pandas==3.0.2
+scipy==1.17.1
+scikit-learn==1.8.0
+argon2-cffi==25.1.0
+python-jose[cryptography]==3.5.0
+pyotp==2.10.0
+httpx==0.28.1
+python-multipart==0.0.26
