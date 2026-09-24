@@ -39,7 +39,7 @@ from ..core.config import AgentMode
 from .security import SECURITY_HEADERS, SecurityManager, Session
 from .state import Runtime
 
-API_VERSION = "1.8.0"
+API_VERSION = "1.8.1"
 
 
 class LoginRequest(BaseModel):

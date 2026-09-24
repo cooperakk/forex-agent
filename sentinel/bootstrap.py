@@ -169,6 +169,22 @@ def _connection_kwargs(config, state_dir, audit) -> dict:
     return kwargs
 
 
+def _enrolment_text(uri: str, user: str) -> str:
+    """The enrolment file: the otpauth URI first (for tools), then the setup
+    key spelled out, because a person holding a phone cannot scan a text file
+    and "Enter a setup key" in an authenticator app wants the key, not a URI."""
+    from urllib.parse import parse_qs, urlparse
+    key = (parse_qs(urlparse(uri).query).get("secret") or [""])[0]
+    return (f"{uri}\n\n"
+            f"Setup key for Google Authenticator / Microsoft Authenticator:\n"
+            f"  app -> + -> 'Enter a setup key' -> account: Sentinel-FX ({user}),\n"
+            f"  key: {key}   (time-based)\n\n"
+            f"کلید راه‌اندازی برای برنامهٔ Google Authenticator روی گوشی:\n"
+            f"  برنامه ← + ← «Enter a setup key» ← نام: Sentinel-FX ({user})\n"
+            f"  کلید: {key}   (نوع: Time based)\n\n"
+            f"After adding it, DELETE this file.  بعد از وارد کردن، این فایل را پاک کنید.\n")
+
+
 def _validated_totp_secret(secret: str) -> str:
     """Reject a TOTP secret that is not usable base32 with real entropy.
 
@@ -554,7 +570,7 @@ def build_runtime(config_path: str | Path = "var/config.json",
                 # against this very secret.
                 fd = os.open(enrol, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
                 try:
-                    os.write(fd, (uri + "\n").encode("utf-8"))
+                    os.write(fd, _enrolment_text(uri, admin_user).encode("utf-8"))
                 finally:
                     os.close(fd)
                 print(f"[bootstrap] owner {admin_user!r} created. Enrol your "

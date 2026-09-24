@@ -87,3 +87,23 @@ def test_windows_cmd_wrappers_point_at_existing_scripts():
         target = cmd.with_suffix(".ps1")
         assert target.is_file(), f"{cmd.name} wraps a missing {target.name}"
         assert f"%~dp0{target.name}" in cmd.read_text(), cmd.name
+
+
+def test_engine_supervisor_survives_stderr_under_windows_powershell():
+    """Regression (fixed in 1.7.1 / 1.8.1): run-engine.ps1 ran the engine as `& $python @argv *>> $log`
+    under $ErrorActionPreference = "Stop". Windows PowerShell 5.1 -- what the
+    scheduled task runs -- turns redirected native stderr into ErrorRecords,
+    so uvicorn's first log line ("Started server process", on stderr) was a
+    terminating error: the supervisor died with exit code 1 a second after
+    start, the engine with it, and the watchdog engaged the kill switch.
+    The native call must run under Continue and must not use PowerShell's
+    file redirection (which also wrote the log as UTF-16)."""
+    import re
+    text = (ROOT / "deploy" / "windows" / "run-engine.ps1").read_text()
+    call = [ln for ln in text.splitlines() if re.search(r"&\s*\$python\s+@argv", ln)]
+    assert len(call) == 1, call
+    assert not re.search(r"[*\d]?>>?", call[0].split("|")[0].replace("2>&1", "")), call[0]
+    before = text[: text.index(call[0])]
+    last = re.findall(r'\$ErrorActionPreference\s*=\s*"(\w+)"', before)[-1]
+    assert last == "Continue", "the native call must not run under Stop"
+    assert "UTF8Encoding($false)" in text

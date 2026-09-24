@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.8.1 -- 2026-09-25
+
+### Fixed -- the engine did not stay up on Windows
+
+- `deploy/windows/run-engine.ps1` ran the engine as `& $python @argv *>> $log`
+  under `$ErrorActionPreference = "Stop"`. The scheduled task runs Windows
+  PowerShell 5.1, which turns redirected native stderr into ErrorRecords. The
+  engine's first log line on stderr (uvicorn's "Started server process") was
+  therefore a terminating error. The consequences:
+  - the supervisor exited with code 1 about a second after start, and the
+    engine went down with it;
+  - the API never answered on port 8088;
+  - the log never said why;
+  - the dead-man watchdog engaged the kill switch 180 s later.
+
+  This affected every Windows install since the supervisor was introduced.
+- The native call now runs under `Continue`. Every output line is appended to
+  the log as UTF-8 text, where the redirection wrote UTF-16, and PowerShell
+  reads Python's output as UTF-8.
+- A regression test pins this.
+- After updating, release the kill switch the watchdog engaged, from the
+  dashboard (owner + code) or with `Kill-Switch.ps1 -Release`.
+
+### Fixed -- the kill switch could not be released from the dashboard
+
+- The API has always accepted a release (`POST /api/control/kill/release`,
+  owner + second factor), and the guides and Diagnose pointed owners to the
+  dashboard for it. But no page called it.
+- While the switch is engaged, the header now offers «برداشتن توقف اضطراری»,
+  and a banner shows who engaged it and why.
+
+### Changed -- first-run help for non-technical owners
+
+- The enrolment file now spells out the authenticator setup key in English
+  and Persian under the `otpauth://` URI. "Enter a setup key" in an
+  authenticator app wants the key, and a text file cannot be scanned.
+- A short Persian Windows guide, `docs/WINDOWS-GUIDE-FA.md`, ships at the top
+  of the package as `00-WINDOWS-GUIDE-FA.html`.
+
 ## 1.8.0 -- 2026-09-24
 
 ### Added -- the US dollar index (`sentinel/data/dxy.py`)

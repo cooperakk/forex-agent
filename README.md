@@ -221,6 +221,16 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 
 ## English
 
+### What's new in 1.8.1
+
+* **Windows fix:** the engine supervisor died a second after start under
+  Windows PowerShell 5.1 (redirected stderr + `Stop`), so the engine never
+  stayed up and the watchdog engaged the kill switch. Fixed and pinned by a
+  test. The kill switch can now be released from the dashboard header.
+* A short Persian Windows guide ships at the top of the package
+  (`00-WINDOWS-GUIDE-FA.html`), and the enrolment file spells out the
+  authenticator setup key.
+
 ### What's new in 1.8.0
 
 * **US dollar index** rebuilt from the broker's own bars (ICE formula), and

@@ -22,6 +22,10 @@ $ErrorActionPreference = "Stop"
 $logDir = Join-Path $StateDir "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log = Join-Path $logDir "$Role.log"
+$utf8 = New-Object System.Text.UTF8Encoding($false)
+# Python writes UTF-8 (PYTHONIOENCODING below); make PowerShell read it as
+# UTF-8 too, not as the console code page. No console: nothing to set.
+try { [Console]::OutputEncoding = $utf8 } catch { }
 $python = Join-Path $InstallDir ".venv\Scripts\python.exe"
 $config = Join-Path $StateDir "config.json"
 $var = Join-Path $StateDir "var"
@@ -67,9 +71,24 @@ while ($true) {
     $started = Get-Date
     Push-Location $InstallDir
     try {
-        & $python @argv *>> $log
+        # Windows PowerShell 5.1 (what the scheduled task runs) turns every line
+        # a native program writes to stderr into an ErrorRecord once stderr is
+        # redirected -- and under $ErrorActionPreference = "Stop" the FIRST such
+        # line is a terminating error. uvicorn logs "Started server process" to
+        # stderr a second after start, so the supervisor died with exit code 1,
+        # the engine went down with it, nothing explained why in the log, and
+        # the watchdog engaged the kill switch 180 s later. It also wrote the
+        # redirected output as UTF-16. So: Continue for the native call only,
+        # and every line appended as plain UTF-8 text, one write per line so
+        # the log stays readable (Diagnose, Notepad) while the engine runs.
+        $ErrorActionPreference = "Continue"
+        & $python @argv 2>&1 | ForEach-Object {
+            try { [System.IO.File]::AppendAllText($log, "$_" + [Environment]::NewLine, $utf8) }
+            catch { }   # a lost log line must never stop the engine
+        }
         $code = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = "Stop"
         Pop-Location
     }
     Log "$Role exited with code $code after $([int]((Get-Date) - $started).TotalSeconds)s"

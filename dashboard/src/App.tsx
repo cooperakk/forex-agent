@@ -215,6 +215,22 @@ export default function App() {
               </span>
             </span>
             <button className="btn ghost sm" onClick={refresh}>تازه‌سازی</button>
+            {s.kill_switch.engaged ? (
+              /* The API has always accepted a release (owner + second factor);
+                 the console had no button for it, so an owner whose robot the
+                 watchdog had stopped was told "release it from the dashboard"
+                 and found nothing to press. */
+              <button className="btn sm" disabled={readOnly || !canAdminister}
+                      title={!canAdminister ? "فقط مالک حساب" : undefined}
+                      onClick={() => setConfirm({
+                        action: "برداشتن توقف اضطراری",
+                        description: <>ربات از چرخهٔ بعد دوباره اجازه دارد معاملهٔ تازه باز کند
+                          (در حالت «فقط پیشنهاد» فقط پیشنهاد می‌دهد). اول مطمئن شوید علت توقف —
+                          که بالای صفحه نوشته شده — برطرف شده است. این کار در دفتر رویدادها ثبت
+                          می‌شود.</>,
+                        path: "/api/control/kill/release", body: {},
+                      })}>برداشتن توقف اضطراری</button>
+            ) : (
             <button className="btn danger sm" disabled={readOnly}
                     onClick={() => setConfirm({
                       action: "فعال کردن کلید توقف اضطراری",
@@ -225,6 +241,7 @@ export default function App() {
                       path: "/api/control/kill",
                       body: { reason: "engaged from the console" }, danger: true,
                     })}>توقف فوری همه‌چیز</button>
+            )}
           </div>
         </header>
 
@@ -237,6 +254,21 @@ export default function App() {
                 عمداً ناخوشایند انتخاب شده‌اند: نمره عملکرد زیر حد قابل قبول، یک افت واقعی در
                 حساب، و حکم نهایی «<em>رد شد</em>» — چون نمایشی که نمودار همیشه‌صعودی و ۹۰٪ برد
                 نشان بدهد، چیز غلطی یاد می‌دهد. معنی هر واژه در صفحه «واژه‌نامه ساده» هست.
+              </Banner>
+            </div>
+          )}
+          {s.kill_switch.engaged && page !== "overview" && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="neg" icon="■">
+                <strong>توقف اضطراری روشن است؛ معاملهٔ تازه باز نمی‌شود.</strong>{" "}
+                دلیل: <span className="ltr mono fs12">{s.kill_switch.reason || "—"}</span>
+                {s.kill_switch.engaged_by ? <> (توسط <span className="ltr">{s.kill_switch.engaged_by}</span>)</> : null}.
+                {" "}معامله‌های باز حد ضررشان را نزد بروکر دارند. این توقف خودکار برداشته نمی‌شود؛
+                وقتی علتش برطرف شد، مالک با دکمهٔ «برداشتن توقف اضطراری» (بالای صفحه) آن را
+                برمی‌دارد.
+                {(s.kill_switch.reason || "").includes("heartbeat") && <> «no heartbeat» یعنی موتور
+                  ربات مدتی جواب نداده بود؛ اگر روی ویندوز نسخهٔ ۱٫۷٫۰ یا ۱٫۸٫۰ نصب بوده، علتش
+                  ایرادی بود که در ۱٫۸٫۱ برطرف شده است.</>}
               </Banner>
             </div>
           )}

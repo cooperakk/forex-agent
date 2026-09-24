@@ -47,8 +47,12 @@ mkdir -p "$DEST/var" && touch "$DEST/var/.gitkeep"
 # self-contained right-to-left HTML page that opens with a double-click.
 PY="${PYTHON:-python3}"
 cp docs/INSTALL-FA.md "$DEST/START-HERE-FA.md"
+# The short Windows guide, named to sort FIRST in Explorer: the page a person
+# who has never installed a server opens before anything else.
+cp docs/WINDOWS-GUIDE-FA.md "$DEST/00-WINDOWS-GUIDE-FA.md"
 cp docs/ALPARI-MT5-FA.md "$DEST/ALPARI-MT5-FA.md"
 if "$PY" -c "import markdown" 2>/dev/null; then
+    "$PY" scripts/render_guide.py docs/WINDOWS-GUIDE-FA.md "$DEST/00-WINDOWS-GUIDE-FA.html"
     "$PY" scripts/render_guide.py docs/INSTALL-FA.md "$DEST/START-HERE-FA.html"
     "$PY" scripts/render_guide.py docs/RAHNAMA-FA.md "$DEST/docs/RAHNAMA-FA.html"
     "$PY" scripts/render_guide.py docs/ALPARI-MT5-FA.md "$DEST/ALPARI-MT5-FA.html"
