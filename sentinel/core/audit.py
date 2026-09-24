@@ -46,6 +46,7 @@ class EventType(str, Enum):
     DATA_STALE = "data.stale"
     DATA_GAP = "data.gap"
     DATA_RECOVERED = "data.recovered"
+    DATA_DIVERGENCE = "data.divergence"   # broker price vs an independent reference
     # decisions
     SIGNAL = "decision.signal"
     PROPOSAL = "decision.proposal"

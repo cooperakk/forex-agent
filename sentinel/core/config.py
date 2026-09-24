@@ -456,6 +456,59 @@ class NewsConfig(StrictModel):
     official_feeds: bool = True
 
 
+class ReferenceConfig(StrictModel):
+    """An independent reference price (TradingView) checked against the broker's.
+
+    OFF by default: the source is unofficial (see docs/TRADINGVIEW.md). When on,
+    a disagreement can only shrink or block a NEW entry, and a missing, delayed
+    or stale reference changes nothing. Deliberately outside the verdict's
+    runtime policy: it fires on a data fault, which is not part of any
+    strategy's validated behaviour, exactly like the kill switch.
+    """
+
+    enabled: bool = False
+    provider: Literal["tradingview"] = "tradingview"
+    exchange: str = Field("OANDA", pattern=r"^[A-Z0-9_]{1,24}$",
+                          description="Used for instruments without an explicit mapping: "
+                                      "EUR_USD -> OANDA:EURUSD.")
+    symbol_map: Dict[str, str] = Field(default_factory=dict,
+                                       description="Instrument -> EXCHANGE:SYMBOL overrides.")
+    shrink_bp: float = Field(5.0, ge=0.5, le=500.0)
+    block_bp: float = Field(12.0, ge=1.0, le=1000.0)
+    spread_multiple_shrink: float = Field(2.0, ge=0.0, le=50.0)
+    spread_multiple_block: float = Field(4.0, ge=0.0, le=100.0)
+    shrink_multiplier: float = Field(0.5, ge=0.0, le=1.0)
+    max_age_sec: int = Field(90, ge=5, le=3600)
+    ta_ratings: bool = True
+    ta_every_min: int = Field(15, ge=5, le=1440)
+
+    @field_validator("symbol_map")
+    @classmethod
+    def _symbols(cls, value: Dict[str, str]) -> Dict[str, str]:
+        import re
+
+        if len(value) > 60:
+            raise ValueError("at most 60 entries")
+        clean: Dict[str, str] = {}
+        for inst, sym in value.items():
+            if not re.match(r"^[A-Z0-9]{2,12}(_[A-Z0-9]{2,12})?$", str(inst)):
+                raise ValueError(f"bad instrument {inst!r}")
+            s = str(sym).strip().upper()
+            if not re.match(r"^[A-Z0-9_]{1,24}:[A-Z0-9._!&\-]{1,40}$", s):
+                raise ValueError(f"{inst}: {sym!r} is not EXCHANGE:SYMBOL")
+            clean[inst] = s
+        return clean
+
+    @model_validator(mode="after")
+    def _check(self) -> "ReferenceConfig":
+        if self.block_bp < self.shrink_bp:
+            raise ValueError("reference.block_bp must be at least reference.shrink_bp")
+        if self.spread_multiple_block < self.spread_multiple_shrink:
+            raise ValueError("reference.spread_multiple_block must be at least "
+                             "reference.spread_multiple_shrink")
+        return self
+
+
 class ResearchConfig(StrictModel):
     """Numeric acceptance thresholds, fixed BEFORE any run (brief section D-2)."""
 
@@ -634,6 +687,7 @@ class SentinelConfig(StrictModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
+    reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)

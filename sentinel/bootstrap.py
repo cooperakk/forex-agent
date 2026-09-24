@@ -412,6 +412,23 @@ def build_runtime(config_path: str | Path = "var/config.json",
     runtime.news_desk = desk
     runtime.coach = TradeCoach(ai, memory)
 
+    # --- independent reference price (TradingView) ---------------------- #
+    # Always wired, started only while `reference.enabled` is on (off by
+    # default), so the owner can switch it from the dashboard without a
+    # restart. It can only shrink or block a new entry; see
+    # sentinel/data/reference.py and docs/TRADINGVIEW.md.
+    from .data.reference import ReferenceDesk, ReferenceGuard
+    from .data.tradingview import TradingViewStream
+
+    stream = TradingViewStream()
+    guard = ReferenceGuard(
+        lambda: agent.config.reference, stream,
+        audit=lambda payload: audit.append(EventType.DATA_DIVERGENCE, payload,
+                                           actor="reference"))
+    agent.reference = guard
+    runtime.reference = ReferenceDesk(lambda: agent.config.reference, guard, stream,
+                                      runtime.reference_instruments)
+
     jwt_secret = os.environ.get("SENTINEL_JWT_SECRET")
     if not jwt_secret:
         jwt_secret = secrets.token_urlsafe(48)

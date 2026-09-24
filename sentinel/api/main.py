@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -38,7 +39,7 @@ from ..core.config import AgentMode
 from .security import SECURITY_HEADERS, SecurityManager, Session
 from .state import Runtime
 
-API_VERSION = "1.5.0"
+API_VERSION = "1.6.0"
 
 
 class LoginRequest(BaseModel):
@@ -102,6 +103,20 @@ class AISettingsSave(BaseModel):
 
 class AIProviderRef(BaseModel):
     provider: str = Field(min_length=2, max_length=20)
+
+
+class ReferenceSave(BaseModel):
+    """The independent reference price (TradingView). Every field is optional;
+    ``symbol_map``, when sent, REPLACES the stored mapping."""
+
+    enabled: Optional[bool] = None
+    exchange: Optional[str] = Field(default=None, max_length=24, pattern=r"^[A-Z0-9_]+$")
+    symbol_map: Optional[Dict[str, str]] = None
+    shrink_bp: Optional[float] = None
+    block_bp: Optional[float] = None
+    shrink_multiplier: Optional[float] = None
+    max_age_sec: Optional[int] = None
+    ta_ratings: Optional[bool] = None
 
 
 class ProposalReview(BaseModel):
@@ -1073,6 +1088,68 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         report = desk.refresh_calendar(now)
         desk.refresh_feeds(now)
         return {"calendar": report, "desk": desk.status.to_dict()}
+
+    # -- independent reference price (TradingView) ------------------------------ #
+
+    @app.get("/api/reference")
+    def reference_overview(session: Session = Depends(current_session)):
+        return runtime.reference_view()
+
+    @app.post("/api/reference/settings")
+    def reference_settings(body: ReferenceSave,
+                           session: Session = Depends(
+                               require_write("reference_settings", requires_owner=True))):
+        patch = {k: v for k, v in body.model_dump().items() if v is not None}
+        if not patch:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "nothing to change")
+        try:
+            result = runtime.update_config({"reference": patch}, session.username,
+                                           replace={("reference", "symbol_map")})
+        except Exception as exc:  # noqa: BLE001 - validation errors are user errors
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:400])
+        desk = getattr(runtime, "reference", None)
+        if desk is not None:
+            try:
+                # Start/stop and resubscribe now; the ratings (an outbound
+                # request of up to 15 s) wait for the background worker.
+                desk.tick(with_ta=False)
+            except Exception:  # noqa: BLE001 - applied at the next background tick
+                pass
+        return {**result, "reference": runtime.reference_view()}
+
+    @app.post("/api/reference/refresh")
+    def reference_refresh(session: Session = Depends(require_write("reference_refresh"))):
+        desk = getattr(runtime, "reference", None)
+        if desk is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "the reference service is not wired")
+        if not runtime.agent.config.reference.enabled:
+            raise HTTPException(status.HTTP_409_CONFLICT, "the reference price is switched off")
+        desk.tick(force_ta=True)
+        return runtime.reference_view()
+
+    _search_times: List[float] = []
+
+    @app.get("/api/reference/search")
+    def reference_search(q: str = Query(min_length=1, max_length=40),
+                         kind: str = Query(default="forex", max_length=12),
+                         session: Session = Depends(current_session)):
+        user = security.get_user(session.username)
+        if user is None or not user.can_change_risk:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "owner only")
+        # Each search is an outbound request on the owner's behalf; ten a
+        # minute is plenty for picking a symbol and useless for anything else.
+        now = time.monotonic()
+        _search_times[:] = [t for t in _search_times if now - t < 60]
+        if len(_search_times) >= 10:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many searches")
+        _search_times.append(now)
+        from ..data.tradingview import TradingViewError, search_symbols
+        try:
+            return {"results": search_symbols(q, kind)}
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:200])
+        except TradingViewError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)[:200])
 
     # -- live stream ---------------------------------------------------------- #
 

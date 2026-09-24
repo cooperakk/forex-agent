@@ -102,6 +102,10 @@ class RiskContext:
     normal_spread_pips: Dict[str, Decimal] = field(default_factory=dict)
 
     news_blackout: Dict[str, str] = field(default_factory=dict)   # instrument -> event
+    #: Instruments whose broker price disagrees with an independent reference
+    #: (sentinel.data.reference), with the reason. Empty when the reference is
+    #: off or unavailable -- its absence never blocks anything.
+    price_divergence: Dict[str, str] = field(default_factory=dict)
     correlations: Dict[Tuple[str, str], float] = field(default_factory=dict)
     cost_models: Dict[str, CostModel] = field(default_factory=dict)
 
@@ -309,6 +313,13 @@ class RiskEngine:
             vetoes.append(Veto("news_blackout",
                                f"scheduled event window: {ctx.news_blackout[intent.instrument]}",
                                observed=ctx.news_blackout[intent.instrument]))
+
+        # ---- 4b. broker price vs an independent reference ------------- #
+        if intent.instrument in ctx.price_divergence:
+            vetoes.append(Veto("reference_divergence",
+                               "the broker's price disagrees with an independent "
+                               f"reference: {ctx.price_divergence[intent.instrument]}",
+                               observed=ctx.price_divergence[intent.instrument][:120]))
 
         # ---- 5. stop discipline --------------------------------------- #
         if intent.stop_loss is None:

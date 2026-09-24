@@ -307,3 +307,48 @@ export interface AIInsights {
   desk: null | Record<string, any>;
   background_errors: string[];
 }
+
+/* Independent reference price (TradingView). */
+export interface ReferenceCheck {
+  instrument: string; symbol: string;
+  status: "ok" | "shrink" | "block" | "stale" | "delayed" | "closed" | "unavailable"
+    | "unmapped" | "no_broker_quote";
+  reason: string; broker_mid: number | null; reference_mid: number | null;
+  divergence_bp: number | null; divergence_pips: number | null;
+  shrink_at_bp: number | null; block_at_bp: number | null;
+  reference_age_sec: number | null; size_multiplier: number; blocked: boolean;
+  median_gap_bp: number | null; recent_gap_bp: number[];
+  checks: number; shrinks: number; blocks: number; ts_ns: number;
+}
+
+export interface ReferenceQuote {
+  symbol: string; mid: number | null; bid: number | null; ask: number | null;
+  last: number | null; change_pct: number | null; description: string;
+  update_mode: string; session: string; delayed: boolean; error: string;
+  price_ns: number; received_ns: number;
+}
+
+export type TARating = { all: number | null; ma: number | null; other: number | null;
+                         label: string };
+
+export interface ReferenceConfig {
+  enabled: boolean; provider: string; exchange: string; symbol_map: Record<string, string>;
+  shrink_bp: number; block_bp: number; spread_multiple_shrink: number;
+  spread_multiple_block: number; shrink_multiplier: number; max_age_sec: number;
+  ta_ratings: boolean; ta_every_min: number;
+}
+
+export interface ReferenceView {
+  available: boolean; enabled: boolean; reason?: string; provider?: string;
+  config?: ReferenceConfig;
+  stream?: { running: boolean; connected: boolean; connected_since_ns: number;
+             last_message_ns: number; connects: number; reconnects: number;
+             dropped_packets: number; last_error: string; last_error_ns: number;
+             next_attempt_ns: number; server_release: string; symbols: string[];
+             symbol_errors: Record<string, string> };
+  mapping?: Record<string, string>;
+  quotes?: Record<string, ReferenceQuote | null>;
+  checks?: ReferenceCheck[];
+  ta?: Record<string, Record<string, TARating>>;
+  ta_last_ns?: number; ta_error?: string; last_tick_ns?: number;
+}

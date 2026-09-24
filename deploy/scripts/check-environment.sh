@@ -142,8 +142,12 @@ if [ "$QUICK" -eq 0 ]; then
     probe "Gemini API"                      https://generativelanguage.googleapis.com/ 0
     probe "DeepSeek API"                    https://api.deepseek.com/ 0
     probe "Kimi (Moonshot) API"             https://api.moonshot.ai/ 0
+    probe "Jev (TypeSafe) API"              https://api.typesafe.ai/ 0
+    probe "TradingView data (reference)"    https://data.tradingview.com/ 0
+    probe "TradingView scanner (ratings)"   https://scanner.tradingview.com/ 0
     probe "OANDA practice API"              https://api-fxpractice.oanda.com/ 0
-    hint "an unreachable news or AI endpoint only disables that feature; trading is unaffected"
+    hint "an unreachable news, AI or TradingView endpoint only disables that feature; trading is unaffected"
+    hint "full TradingView test (websocket + ratings): .venv/bin/python scripts/tv_history.py --selftest"
 fi
 
 # --------------------------------------------------------------------------- #

@@ -6,6 +6,7 @@ import {
 import { Banner, Card, Chip, ConfirmWrite, Hint, Seg, useLocalState } from "./components/ui";
 import AgentPage from "./pages/AgentPage";
 import AIPage from "./pages/AIPage";
+import ReferencePage from "./pages/ReferencePage";
 import ManualTrade from "./pages/ManualTrade";
 import Audit from "./pages/Audit";
 import Brokers from "./pages/Brokers";
@@ -21,7 +22,7 @@ import Users from "./pages/Users";
 import type { Snapshot } from "./types";
 
 type Page = "overview" | "positions" | "manual" | "journal" | "risk" | "research" | "agent"
-  | "ai" | "settings" | "brokers" | "users" | "licence" | "audit" | "glossary";
+  | "ai" | "reference" | "settings" | "brokers" | "users" | "licence" | "audit" | "glossary";
 
 /* Nav labels are the first words a newcomer reads, so they say what the page
    shows rather than what the subsystem is called. */
@@ -34,6 +35,7 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "research", label: "آزمایش و اثبات", icon: "⬡" },
   { id: "agent", label: "تصمیم‌های ربات", icon: "◐" },
   { id: "ai", label: "هوش مصنوعی و اخبار", icon: "✦" },
+  { id: "reference", label: "قیمت مرجع (TradingView)", icon: "⚖" },
   { id: "settings", label: "تنظیمات", icon: "⚙" },
   { id: "brokers", label: "بروکر و اتصال", icon: "⇄" },
   { id: "users", label: "کاربران", icon: "☰" },
@@ -260,6 +262,9 @@ export default function App() {
                                              readOnly={readOnly} />}
           {page === "ai" && <AIPage provider={provider} write={write} readOnly={readOnly}
                                     canAdminister={canAdminister} />}
+          {page === "reference" && <ReferencePage provider={provider} write={write}
+                                                  readOnly={readOnly}
+                                                  canAdminister={canAdminister} />}
           {page === "journal" && <Journal snap={snap} />}
           {page === "risk" && <Risk snap={snap} />}
           {page === "research" && <Research snap={snap} />}

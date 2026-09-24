@@ -191,12 +191,22 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 | [`docs/BROKERS.md`](docs/BROKERS.md) | بروکرها: AMarkets، آلپاری، و هر بروکر متاتریدر |
 | [`docs/WINDOWS-SERVER.md`](docs/WINDOWS-SERVER.md) | Windows Server installation and operations |
 | [`docs/AI-PROVIDERS.md`](docs/AI-PROVIDERS.md) | AI providers, keys, and what a model may do |
+| [`docs/TRADINGVIEW.md`](docs/TRADINGVIEW.md) | TradingView reference price, ratings and research history |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 
 ---
 ---
 
 ## English
+
+### What's new in 1.6.0
+
+* **Independent reference price (TradingView)** -- the broker's price is
+  compared with TradingView's; a disagreement can only shrink or block a new
+  entry, and a missing reference changes nothing. Technical ratings are shown
+  on the dashboard (never traded), and `scripts/tv_history.py` downloads
+  research history. Off by default -- the interface is unofficial. See
+  [`docs/TRADINGVIEW.md`](docs/TRADINGVIEW.md).
 
 ### What's new in 1.5.0
 

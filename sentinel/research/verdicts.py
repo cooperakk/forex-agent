@@ -65,7 +65,10 @@ def runtime_policy(config=None) -> dict:
 
     Risk limits, execution settings, news policy, research thresholds and the
     agent's gating -- but NOT the mode or the venue, which are operating
-    choices about the same validated behaviour, not changes to it.
+    choices about the same validated behaviour, not changes to it. The
+    ``reference`` section (the independent price check) is left out for the
+    same reason as the kill switch: it acts on a data FAULT, which no
+    validated strategy depends on, and it can only shrink or block.
     """
     from ..core.config import SentinelConfig
     data = config.model_dump(mode="json") if hasattr(config, "model_dump") else config
