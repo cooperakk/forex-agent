@@ -95,6 +95,8 @@ class Runtime:
         self.news_desk = None    # sentinel.news.desk.NewsDesk
         self.coach = None        # sentinel.ai.coach.TradeCoach
         self.reference = None    # sentinel.data.reference.ReferenceDesk
+        self.brain = None        # sentinel.brain.Brain
+        self.notifier = None     # sentinel.notify.Notifier
         self._bg_thread: Optional[threading.Thread] = None
         self.background_errors: List[str] = []
         self.background_last_ns: int = 0
@@ -431,7 +433,8 @@ class Runtime:
             self._thread.start()
 
             if (self.news_desk is not None or self.coach is not None
-                    or self.reference is not None):
+                    or self.reference is not None or self.brain is not None
+                    or self.notifier is not None):
                 def background() -> None:
                     # First pass soon after start, then once a minute; each
                     # assistant decides for itself whether it is due.
@@ -449,7 +452,9 @@ class Runtime:
         self.background_last_ns = wall_ns()
         for name, step in (("news", getattr(self.news_desk, "tick", None)),
                            ("coach", getattr(self.coach, "tick", None)),
-                           ("reference", getattr(self.reference, "tick", None))):
+                           ("reference", getattr(self.reference, "tick", None)),
+                           ("brain", getattr(self.brain, "tick", None)),
+                           ("notify", getattr(self.notifier, "tick", None))):
             if step is None:
                 continue
             try:
@@ -464,6 +469,8 @@ class Runtime:
             self._thread.join(timeout=10)
         if self.reference is not None:
             self.reference.stop()
+        if self.notifier is not None:
+            self.notifier.stop()
         self.agent.stop()
 
     def reference_instruments(self) -> List[str]:
@@ -602,7 +609,28 @@ class Runtime:
             "proposals_pending": len(agent.proposals.pending()),
             "config_version": cfg.version,
             "errors": self.errors[-5:],
+            "cooldowns": self._brain_cooldowns(),
+            "day_pnl": (str(acct.equity - agent.day_start_equity)
+                        if "error" not in account and agent.day_start_equity > 0 else None),
         }
+
+    def _brain_cooldowns(self) -> Dict[str, str]:
+        if self.brain is None:
+            return {}
+        try:
+            return self.brain.cooldowns()
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def brain_view(self) -> Dict[str, Any]:
+        if self.brain is None:
+            return {"enabled": False, "available": False}
+        regime = self.agent.regime.regime.value if self.agent.regime else ""
+        names = [a.name for a in self.agent.config.strategies if a.enabled]
+        view = self.brain.view(names, regime)
+        view["available"] = True
+        view["regime"] = regime
+        return view
 
     def _entries_permitted(self) -> Dict[str, Any]:
         try:

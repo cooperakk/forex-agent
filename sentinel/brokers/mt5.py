@@ -718,8 +718,38 @@ class MT5Broker(Broker):
             if t and t.bid:
                 mid = (dec(t.bid) + dec(t.ask)) / D("2")
                 return (D("1") / mid) if invert else mid
+        # No direct pair -- the normal case on a CENT account (USC, EUC...),
+        # where no "USDUSC" symbol exists. Ask the terminal instead: a symbol
+        # quoted in `quote_ccy` reports the value of one tick of one lot in the
+        # ACCOUNT currency, so tick_value / (tick_size x contract_size) IS the
+        # quote -> account rate, by the broker's own definition of its cent
+        # account (whatever that is: some brokers price a cent account at 1
+        # USC per 1 USD of P&L on a micro contract, others at 100).
+        rate = self._rate_from_tick_value(quote_ccy)
+        if rate is not None:
+            return rate
         raise ConversionMissingError(f"no {quote_ccy}->{account_ccy} symbol",
                                      quote_ccy=quote_ccy, account_ccy=account_ccy)
+
+    def _rate_from_tick_value(self, quote_ccy: str) -> Optional[Decimal]:
+        instruments = self._instruments or {}
+        for canonical, inst in instruments.items():
+            if inst.quote != quote_ccy:
+                continue
+            try:
+                info = self._mt5.symbol_info(self._venue(canonical))
+            except Exception:  # noqa: BLE001 - try the next symbol
+                continue
+            if info is None:
+                continue
+            tv = dec(getattr(info, "trade_tick_value", 0) or 0)
+            ts = dec(getattr(info, "trade_tick_size", 0) or 0)
+            cs = dec(getattr(info, "trade_contract_size", 0) or 0)
+            if tv > 0 and ts > 0 and cs > 0:
+                rate = tv / (ts * cs)
+                if rate > 0:
+                    return rate
+        return None
 
     def account(self) -> AccountState:
         a = self._mt5.account_info()

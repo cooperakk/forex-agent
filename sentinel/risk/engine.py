@@ -106,6 +106,15 @@ class RiskContext:
     #: (sentinel.data.reference), with the reason. Empty when the reference is
     #: off or unavailable -- its absence never blocks anything.
     price_divergence: Dict[str, str] = field(default_factory=dict)
+    #: Active loss-streak cooldowns: "*" (the whole account) or a strategy
+    #: name -> the reason. Set by the agent's brain (sentinel.brain); empty
+    #: when none is running. Deterministic: a streak of losses is a fact.
+    cooldowns: Dict[str, str] = field(default_factory=dict)
+    #: Gap-stress budget (sentinel.risk.stress): currency -> worst historical
+    #: gap as a fraction of price, and the share of equity the whole book may
+    #: lose if every position gapped at once. Empty/zero disables the check.
+    stress_scenarios: Dict[str, float] = field(default_factory=dict)
+    stress_limit_pct: Decimal = ZERO
     correlations: Dict[Tuple[str, str], float] = field(default_factory=dict)
     cost_models: Dict[str, CostModel] = field(default_factory=dict)
 
@@ -313,6 +322,17 @@ class RiskEngine:
             vetoes.append(Veto("news_blackout",
                                f"scheduled event window: {ctx.news_blackout[intent.instrument]}",
                                observed=ctx.news_blackout[intent.instrument]))
+
+        # ---- 4a. loss-streak cooldown ----------------------------------- #
+        # After a run of losses the account (or the strategy) rests. The
+        # classic failure after three losses is to size up to "win it back";
+        # a rest is the mechanical opposite, and it applies to a human ticket
+        # too, because humans revenge-trade at least as readily as models.
+        scope = ("*" if "*" in ctx.cooldowns else
+                 intent.strategy if intent.strategy in ctx.cooldowns else None)
+        if scope is not None:
+            vetoes.append(Veto("loss_streak_cooldown", ctx.cooldowns[scope][:240],
+                               observed=scope))
 
         # ---- 4b. broker price vs an independent reference ------------- #
         if intent.instrument in ctx.price_divergence:
@@ -536,6 +556,49 @@ class RiskEngine:
         if not sizing.feasible:
             vetoes.append(Veto("sizing", "; ".join(sizing.notes) or "position is not sizeable",
                                observed=str(sizing.lots)))
+
+        # ---- 10b. gap stress (sentinel.risk.stress) ---------------------- #
+        # The stop bounds the loss of a market that trades through it; this
+        # bounds the loss of one that GAPS past it (CHF 2015, GBP 2016, JPY
+        # 2019). The new position is shrunk until the whole book fits the
+        # stress budget, and refused only if even the minimum lot cannot.
+        if (ctx.stress_scenarios and ctx.stress_limit_pct > 0 and sizing.feasible
+                and sizing.lots > 0):
+            from dataclasses import replace as _replace
+
+            from .stress import book_stress_loss, max_lots_within
+            stress_mids = {k: v.mid for k, v in ctx.quotes.items()}
+            open_stress, unpriced = book_stress_loss(
+                ctx.positions, ctx.instruments, stress_mids, ctx.conversions,
+                ctx.account.currency, ctx.stress_scenarios)
+            budget = base_eq * dec(ctx.stress_limit_pct) / D("100") - open_stress
+            cap = inst.round_lots_down(max_lots_within(
+                budget, inst, quote.mid, conv, ctx.stress_scenarios))
+            diag["stress_open_pct"] = (f"{open_stress / base_eq * D('100'):.2f}"
+                                       if base_eq > 0 else "n/a")
+            diag["stress_cap_lots"] = str(cap)
+            if unpriced:
+                warnings.append(Veto("stress_unpriced",
+                                     "gap stress excludes positions it cannot price: "
+                                     + ", ".join(sorted(set(unpriced))), Severity.WARN))
+            if cap < sizing.lots:
+                if cap < inst.min_lot:
+                    vetoes.append(Veto(
+                        "stress_gap",
+                        f"a historical gap on every open position plus this one would "
+                        f"cost more than {ctx.stress_limit_pct}% of equity",
+                        observed=f"open stress {diag['stress_open_pct']}%",
+                        limit=f"{ctx.stress_limit_pct}%"))
+                else:
+                    scale = cap / sizing.lots
+                    sizing = _replace(sizing, lots=cap,
+                                      risk_amount=sizing.risk_amount * scale,
+                                      risk_pct=sizing.risk_pct * scale)
+                    warnings.append(Veto(
+                        "stress_shrunk",
+                        f"size reduced to {cap} lots so a historical gap cannot cost "
+                        f"more than {ctx.stress_limit_pct}% of equity", Severity.WARN,
+                        observed=str(cap)))
         for note in sizing.notes:
             if sizing.feasible:
                 warnings.append(Veto("sizing", note, Severity.WARN))

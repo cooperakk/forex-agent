@@ -30,11 +30,12 @@ import zipfile
 from pathlib import Path
 from typing import List, Optional
 
-DATABASES = ("verdicts.db", "memory.db", "market.db", "calendar.db", "users.db", "ai.db")
+DATABASES = ("verdicts.db", "memory.db", "market.db", "calendar.db", "users.db", "ai.db",
+             "brain.db")
 FILES = ("audit.jsonl", "watchdog.jsonl", "admin.jsonl", "agent_state.json",
          "proposals.json", "config.json", "brokers.json", "broker-secrets.json",
          "ai-secrets.json", "ai.json", "mt5-intents.json", "licence.key",
-         "licence-timing.json", "licence-lease.json")
+         "licence-timing.json", "licence-lease.json", "notify.json", "notify-secrets.json")
 JOURNALS = ("audit.jsonl", "watchdog.jsonl", "admin.jsonl")
 GENESIS = "0" * 64
 

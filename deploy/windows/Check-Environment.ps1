@@ -100,7 +100,9 @@ if (-not $Quick) {
         @("Kimi (Moonshot) API", "https://api.moonshot.ai/", $false),
         @("Jev (TypeSafe) API", "https://api.typesafe.ai/", $false),
         @("TradingView data (reference)", "https://data.tradingview.com/", $false),
-        @("TradingView scanner (ratings)", "https://scanner.tradingview.com/", $false)
+        @("TradingView scanner (ratings)", "https://scanner.tradingview.com/", $false),
+        @("Telegram Bot API (notifications)", "https://api.telegram.org/", $false),
+        @("Bale Bot API (notifications)", "https://tapi.bale.ai/", $false)
     )
     foreach ($t in $targets) {
         $reached = $false
@@ -115,7 +117,7 @@ if (-not $Quick) {
         elseif ($t[2]) { Bad "$($t[0]) NOT reachable ($($t[1]))" }
         else { W "$($t[0]) not reachable -- only matters if you use it" }
     }
-    Hint "an unreachable news, AI or TradingView endpoint only disables that feature; trading is unaffected"
+    Hint "an unreachable news, AI, TradingView, Telegram or Bale endpoint only disables that feature; trading is unaffected"
     Hint "full TradingView test (websocket + ratings): .venv\Scripts\python.exe scripts\tv_history.py --selftest"
 }
 

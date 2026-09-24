@@ -1,5 +1,95 @@
 # Changelog
 
+## 1.7.0 -- 2026-09-24
+
+### Added -- the brain (`sentinel/brain`), shrink-only learning
+
+- **Shadow book.** Every signal the agent considers is recorded once per
+  `(strategy, instrument, side, bar)` in `var/brain.db`. That covers executed,
+  vetoed, skipped and proposed signals. Each is later resolved against the bars
+  that followed:
+  - triple barrier with the stop counted first;
+  - a gap fills at the open;
+  - cost is charged in R;
+  - expiry after three horizons.
+- **Veto scorecard and layer attribution.** Each rule is marked
+  helped/hurt/unclear/insufficient from the outcomes of what it stopped. Each
+  brain layer is credited `-(1-m)*R` on the trades it shrank.
+- **Loss-streak cooldowns.** 3 consecutive losses rest the account for 4h, and
+  4 rest one strategy for 24h. They are enforced by the risk engine as
+  `loss_streak_cooldown`, manual tickets included. The owner can lift one early
+  (journalled).
+- **CUSUM drift detection.** Page 1954, with k=0.5 and h=4. It measures against
+  the lab's baseline and uses hysteresis. On alarm the strategy trades at half
+  size (`brain.drift`).
+- **Equity-curve filter**, **Bayesian allocation** (normal-normal shrinkage per
+  strategy × regime) and **similar-situation memory** (kNN over resolved shadow
+  signals).
+- **Nightly research lab.**
+  - Every enabled strategy is re-tested on the broker's stored bars at 1× and
+    2× cost, with block-bootstrap intervals, and labelled
+    alive/weak/dead/insufficient.
+  - The lab result becomes the drift baseline.
+  - Pending `risk.*` proposals are A/B-tested on the same bars.
+- **Meta-label candidate.** Trained on the first 60% of the lab window, with
+  labels that overlap the holdout purged, and judged on the last 40%.
+  - It is offered only with holdout AUC ≥ `meta_min_auc` and positive
+    expected value.
+  - It is active only after owner approval, and its SHA-256 is verified on
+    every load.
+- **Weekly self-report** (`brain.report`).
+- Dashboard page «مغز ربات (یادگیری)»: cooldowns, per-strategy health with the
+  CUSUM gauge, the veto scorecard, models, the lab, weekly reports and settings.
+- API: `GET /api/brain` plus owner+TOTP endpoints for settings, the lab run,
+  model approve/retire and cooldown clear.
+
+### Added -- gap stress (`sentinel/risk/stress.py`)
+
+- Per-currency worst recorded gaps: CHF 30%, GBP 9%, JPY/AUD 7%, EUR/USD 2%,
+  and 3% for any other currency.
+- A new entry is shrunk until the whole book's stress loss fits
+  `brain.stress_loss_limit_pct` (default 25% of equity) (`stress_shrunk`). It is
+  refused only if even the minimum lot cannot fit (`stress_gap`).
+
+### Added -- Telegram and Bale notifications (`sentinel/notify`)
+
+- Driven by the audit journal through the new `AuditLog.add_listener`. Every
+  notification corresponds to a recorded event.
+- Persian messages in six categories (critical, trades, proposals, learning,
+  security, daily).
+- Repeats are deduplicated for 10 minutes, sends are rate-limited per channel,
+  and bursts of failed sign-ins are reported.
+- Fixed hosts: `api.telegram.org` and `tapi.bale.ai`. Redirects are not
+  followed, the token is scrubbed from every error, and tokens are encrypted in
+  the broker secret store.
+- Optional phone commands: `/status` and `/stop` only, and only from the
+  configured chat. Commands older than 5 minutes are ignored, and the offset is
+  persisted so a restart does not replay them. There is no command that
+  releases the kill switch or takes risk.
+- Dashboard page «اعلان‌ها (تلگرام و بله)» with a guided setup, including chat
+  discovery. `position.open` is now journalled on every fill.
+
+### Added -- MetaTrader 5 onboarding
+
+- `scripts/mt5_check.py` and `deploy/windows/Check-MT5.cmd`: a read-only
+  connection check with a Persian report.
+  - Covers terminal and Python bitness, login errors, investor vs trading
+    password, Algo Trading, demo/real, cent accounts, symbol suffix and a live
+    quote.
+  - For error -6 it gives an Alpari-specific checklist.
+- **Cent accounts.** When no direct `USD→USC` symbol exists, the MT5 adapter
+  derives the conversion from the terminal's own
+  `tick_value / (tick_size × contract_size)`.
+- `docs/ALPARI-MT5-FA.md`, `docs/BRAIN.md`, `docs/RESEARCH-NOTES.md`.
+- The environment checks probe the Telegram and Bale APIs.
+
+### Changed
+
+- The orchestrator always computes the signal's feature context once, for the
+  meta filter, the similarity memory and the shadow book alike. A filter named
+  in the configuration still wins over one approved in the brain.
+- API version 1.7.0.
+
 ## 1.6.0 -- 2026-09-24
 
 ### Added -- an independent reference price (TradingView)

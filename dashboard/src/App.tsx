@@ -7,6 +7,8 @@ import { Banner, Card, Chip, ConfirmWrite, Hint, Seg, useLocalState } from "./co
 import AgentPage from "./pages/AgentPage";
 import AIPage from "./pages/AIPage";
 import ReferencePage from "./pages/ReferencePage";
+import BrainPage from "./pages/BrainPage";
+import NotifyPage from "./pages/NotifyPage";
 import ManualTrade from "./pages/ManualTrade";
 import Audit from "./pages/Audit";
 import Brokers from "./pages/Brokers";
@@ -22,7 +24,8 @@ import Users from "./pages/Users";
 import type { Snapshot } from "./types";
 
 type Page = "overview" | "positions" | "manual" | "journal" | "risk" | "research" | "agent"
-  | "ai" | "reference" | "settings" | "brokers" | "users" | "licence" | "audit" | "glossary";
+  | "brain" | "ai" | "reference" | "notify" | "settings" | "brokers" | "users" | "licence"
+  | "audit" | "glossary";
 
 /* Nav labels are the first words a newcomer reads, so they say what the page
    shows rather than what the subsystem is called. */
@@ -34,8 +37,10 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "risk", label: "سقف‌های ایمنی", icon: "◉" },
   { id: "research", label: "آزمایش و اثبات", icon: "⬡" },
   { id: "agent", label: "تصمیم‌های ربات", icon: "◐" },
+  { id: "brain", label: "مغز ربات (یادگیری)", icon: "✺" },
   { id: "ai", label: "هوش مصنوعی و اخبار", icon: "✦" },
   { id: "reference", label: "قیمت مرجع (TradingView)", icon: "⚖" },
+  { id: "notify", label: "اعلان‌ها (تلگرام و بله)", icon: "✉" },
   { id: "settings", label: "تنظیمات", icon: "⚙" },
   { id: "brokers", label: "بروکر و اتصال", icon: "⇄" },
   { id: "users", label: "کاربران", icon: "☰" },
@@ -166,6 +171,8 @@ export default function App() {
             {n.label}
             {n.id === "positions" && snap.advice.length > 0 &&
               <span className="badge-count">{snap.advice.length}</span>}
+            {n.id === "brain" && s.cooldowns && Object.keys(s.cooldowns).length > 0 &&
+              <span className="badge-count">{Object.keys(s.cooldowns).length}</span>}
             {n.id === "agent" && snap.proposals.filter((p) => p.status === "pending").length > 0 &&
               <span className="badge-count">
                 {snap.proposals.filter((p) => p.status === "pending").length}
@@ -239,6 +246,16 @@ export default function App() {
               </Banner>
             </div>
           )}
+          {s.cooldowns && Object.keys(s.cooldowns).length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="warn" icon="😮‍💨">
+                <strong>استراحت اجباری:</strong>{" "}
+                {Object.keys(s.cooldowns).map((k) => k === "*" ? "کل حساب" : k).join("، ")} — بعد
+                از چند ضرر پشت سر هم، تا پایان استراحت معامله تازه باز نمی‌شود. جزئیات در صفحه
+                «مغز ربات».
+              </Banner>
+            </div>
+          )}
           {s.guard_suspended && Object.keys(s.guard_suspended).length > 0 && (
             <div style={{ marginBottom: 16 }}>
               <Banner tone="warn" icon="⏸">
@@ -265,6 +282,10 @@ export default function App() {
           {page === "reference" && <ReferencePage provider={provider} write={write}
                                                   readOnly={readOnly}
                                                   canAdminister={canAdminister} />}
+          {page === "brain" && <BrainPage provider={provider} write={write} readOnly={readOnly}
+                                          canAdminister={canAdminister} />}
+          {page === "notify" && <NotifyPage provider={provider} write={write} readOnly={readOnly}
+                                            canAdminister={canAdminister} />}
           {page === "journal" && <Journal snap={snap} />}
           {page === "risk" && <Risk snap={snap} />}
           {page === "research" && <Research snap={snap} />}

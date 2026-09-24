@@ -509,6 +509,100 @@ class ReferenceConfig(StrictModel):
         return self
 
 
+def _default_stress_scenarios() -> Dict[str, float]:
+    from ..risk.stress import DEFAULT_SCENARIOS
+    return dict(DEFAULT_SCENARIOS)
+
+
+class BrainConfig(StrictModel):
+    """The agent's adaptive layer (sentinel.brain): learning that can only SHRINK.
+
+    Every layer here can reduce a position, rest the account or refuse a trade;
+    none can enlarge a position beyond what the risk engine already allows, and
+    none can change a risk limit. The section is deliberately outside the
+    verdict's runtime policy for that reason: with these layers on, a validated
+    strategy trades the same signals with equal or LESS exposure. Whether each
+    layer actually helps is measured by the brain's own counterfactual
+    scorecard, and any layer can be switched off here.
+    """
+
+    enabled: bool = True
+    #: Record every signal -- executed, vetoed or skipped -- and score what it
+    #: would have done. The raw material of every layer below.
+    shadow_book: bool = True
+    shadow_default_horizon_bars: int = Field(30, ge=2, le=500)
+
+    #: Consecutive losing trades that rest the WHOLE account (0 = off).
+    loss_streak_limit: int = Field(3, ge=0, le=20)
+    loss_streak_cooldown_hours: float = Field(4.0, ge=0.0, le=168.0)
+    #: Consecutive losses that rest ONE strategy (0 = off).
+    strategy_loss_streak_limit: int = Field(4, ge=0, le=20)
+    strategy_cooldown_hours: float = Field(24.0, ge=0.0, le=720.0)
+
+    #: CUSUM drift detector: live trade R against the strategy's baseline.
+    drift_enabled: bool = True
+    drift_min_trades: int = Field(8, ge=3, le=500)
+    drift_k: float = Field(0.5, ge=0.0, le=3.0)
+    drift_h: float = Field(4.0, ge=1.0, le=20.0)
+    drift_multiplier: float = Field(0.5, ge=0.0, le=1.0)
+    #: Baseline mean R when the research lab has not measured one yet.
+    drift_expected_r: float = Field(0.1, ge=-1.0, le=3.0)
+
+    #: Equity-curve filter: a strategy below the moving average of its own
+    #: cumulative R trades smaller.
+    equity_filter_enabled: bool = True
+    equity_filter_window: int = Field(20, ge=5, le=200)
+    equity_filter_multiplier: float = Field(0.5, ge=0.0, le=1.0)
+
+    #: Similar-situation memory (k nearest resolved signals).
+    similarity_enabled: bool = True
+    similarity_k: int = Field(25, ge=5, le=200)
+    similarity_min_samples: int = Field(60, ge=20, le=100_000)
+    similarity_multiplier: float = Field(0.5, ge=0.0, le=1.0)
+
+    #: Bayesian allocation across strategy x regime cells (shrink-only).
+    allocation_enabled: bool = True
+    allocation_prior_mean_r: float = Field(0.1, ge=-1.0, le=3.0)
+    allocation_prior_sd: float = Field(0.25, gt=0.0, le=3.0)
+    allocation_floor: float = Field(0.25, ge=0.0, le=1.0)
+
+    #: Gap stress budget (sentinel.risk.stress).
+    stress_enabled: bool = True
+    stress_loss_limit_pct: float = Field(25.0, gt=0.0, le=100.0)
+    stress_scenarios: Dict[str, float] = Field(default_factory=_default_stress_scenarios)
+
+    #: Nightly research lab and the meta-label filter it trains.
+    lab_enabled: bool = True
+    lab_hour_utc: int = Field(2, ge=0, le=23)
+    lab_max_minutes: int = Field(20, ge=1, le=240)
+    lab_max_bars: int = Field(3000, ge=300, le=200_000)
+    meta_auto_train: bool = True
+    meta_min_auc: float = Field(0.55, ge=0.5, le=0.95)
+
+    #: Weekly self-report (0=Mon .. 6=Sun).
+    weekly_report_dow: int = Field(6, ge=0, le=6)
+    weekly_report_hour_utc: int = Field(8, ge=0, le=23)
+
+    @field_validator("stress_scenarios")
+    @classmethod
+    def _scenarios(cls, value: Dict[str, float]) -> Dict[str, float]:
+        import re
+
+        if len(value) > 80:
+            raise ValueError("at most 80 scenarios")
+        clean: Dict[str, float] = {}
+        for ccy, gap in value.items():
+            key = str(ccy).strip().upper()
+            if key != "*" and not re.match(r"^[A-Z0-9]{2,8}$", key):
+                raise ValueError(f"bad currency {ccy!r}")
+            g = float(gap)
+            if not 0.0 <= g <= 1.0:
+                raise ValueError(f"{key}: a gap is a fraction of price in [0, 1]")
+            clean[key] = g
+        clean.setdefault("*", 0.03)
+        return clean
+
+
 class ResearchConfig(StrictModel):
     """Numeric acceptance thresholds, fixed BEFORE any run (brief section D-2)."""
 
@@ -688,6 +782,7 @@ class SentinelConfig(StrictModel):
     data: DataConfig = Field(default_factory=DataConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
+    brain: BrainConfig = Field(default_factory=BrainConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
