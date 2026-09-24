@@ -382,9 +382,25 @@ def build_runtime(config_path: str | Path = "var/config.json",
         except Exception as exc:  # noqa: BLE001 - a calendar is not worth a failed boot
             print(f"[bootstrap] offline calendar seeding failed ({exc}); the news filter "
                   "will see an empty calendar. This is a degraded state, not a quiet one.")
+    # --- AI assistants and live news ------------------------------------ #
+    # Built before the policy so the policy can read the desk's cached
+    # extractions. Nothing here is on the trading thread: the desk and the
+    # coach run on the runtime's background worker.
+    from .ai import AIService
+    from .ai.coach import TradeCoach
+    from .news.desk import NewsDesk
+    from .news.feeds import OFFICIAL_FEEDS
+
+    ai = AIService(state_dir, audit, capability_check=gate.may_use)
+    desk = None
+    if config.news.enabled and (config.news.live_calendar or config.news.official_feeds):
+        desk = NewsDesk(calendar if config.news.live_calendar else None, ai=ai,
+                        feeds=OFFICIAL_FEEDS if config.news.official_feeds else (),
+                        training_cutoff=config.news.llm_training_cutoff)
     news = NewsPolicy(calendar, role=config.news.role,
                       before_min=config.risk.block_minutes_before_high_impact,
-                      after_min=config.risk.block_minutes_after_high_impact)
+                      after_min=config.risk.block_minutes_after_high_impact,
+                      extractions_source=(desk.recent_extractions if desk else None))
 
     # The licence is asked again before every NEW live entry, not only here at
     # boot: a licence that expires while the service stays up must stop new
@@ -392,6 +408,9 @@ def build_runtime(config_path: str | Path = "var/config.json",
     agent = Agent(config, broker, feed, audit, memory, proposals=proposals, news=news,
                   entry_gate=gate.may_trade_live)
     runtime = Runtime(agent, config_path, verdicts=verdicts, licence=gate)
+    runtime.ai = ai
+    runtime.news_desk = desk
+    runtime.coach = TradeCoach(ai, memory)
 
     jwt_secret = os.environ.get("SENTINEL_JWT_SECRET")
     if not jwt_secret:

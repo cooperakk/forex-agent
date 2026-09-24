@@ -448,6 +448,12 @@ class NewsConfig(StrictModel):
         default_factory=lambda: ["NFP", "CPI", "FOMC", "ECB", "BOE", "BOJ", "GDP", "PMI"]
     )
     calendar_source: str = "local"
+    # Live inputs (sentinel/news/feeds.py). The confirmed calendar is what makes
+    # blackout windows real -- the bundled schedule is a pattern and, by design,
+    # never blocks. Both need outbound HTTPS from the engine host; with no
+    # internet access, switch them off and the bundled pattern keeps working.
+    live_calendar: bool = True
+    official_feeds: bool = True
 
 
 class ResearchConfig(StrictModel):
@@ -580,6 +586,14 @@ class AgentConfig(StrictModel):
     # the risk engine on every primary signal. Its file hash is part of the
     # acceptance fingerprint: a different model is a different system.
     meta_model_path: Optional[str] = None
+    # Manual trades from the dashboard ticket run through the SAME risk engine
+    # as the agent's (stop required, sizing by risk, every loss budget, news
+    # blackout, exposure limits). On a paper or demo venue they are always
+    # available. With REAL money they are off unless the owner turns this on:
+    # the lifecycle rule exists to keep unvalidated ALGORITHMS away from real
+    # money, and a human ticket is a different decision the owner must make
+    # deliberately, once, in writing.
+    manual_trading_live: bool = False
 
     @field_validator("session_windows_utc")
     @classmethod

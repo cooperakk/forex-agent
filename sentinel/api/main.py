@@ -72,6 +72,38 @@ class GuardRelease(BaseModel):
     strategy: str = Field(min_length=1, max_length=64)
 
 
+_DECIMAL_TEXT = r"^[0-9]+(\.[0-9]+)?$"
+
+
+class ManualTicket(BaseModel):
+    instrument: str = Field(min_length=3, max_length=24, pattern=r"^[A-Z0-9_.]+$")
+    side: str = Field(pattern=r"^(BUY|SELL)$")
+    stop_loss: str = Field(min_length=1, max_length=24, pattern=_DECIMAL_TEXT)
+    take_profit: Optional[str] = Field(default=None, max_length=24, pattern=_DECIMAL_TEXT)
+    risk_pct: Optional[str] = Field(default=None, max_length=8, pattern=_DECIMAL_TEXT)
+
+
+class AIProviderSave(BaseModel):
+    provider: str = Field(min_length=2, max_length=20)
+    enabled: bool = False
+    model: str = Field(default="", max_length=120)
+    base_url: str = Field(default="", max_length=300)
+    #: None keeps the stored key; "" deletes it.
+    api_key: Optional[str] = Field(default=None, max_length=400)
+
+
+class AISettingsSave(BaseModel):
+    primary: str = Field(default="", max_length=20)
+    fallbacks: List[str] = Field(default_factory=list, max_length=6)
+    purposes: Dict[str, bool] = Field(default_factory=dict)
+    max_calls_per_hour: int = Field(default=60, ge=0, le=10000)
+    max_calls_per_day: int = Field(default=400, ge=0, le=100000)
+
+
+class AIProviderRef(BaseModel):
+    provider: str = Field(min_length=2, max_length=20)
+
+
 class ProposalReview(BaseModel):
     proposal_id: str
     approve: bool
@@ -576,6 +608,44 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
                                 "this strategy is not suspended by the performance guard")
         return {"released": body.strategy}
 
+    # -- manual trading --------------------------------------------------- #
+    #
+    # A human's ticket goes through the SAME risk engine as the agent's: the
+    # stop is mandatory, the size comes from the risk budget, and every veto
+    # applies. The preview is a GET because it changes nothing.
+
+    @app.get("/api/trade/preview")
+    def preview_ticket(instrument: str = Query(..., min_length=3, max_length=24,
+                                               pattern=r"^[A-Z0-9_.]+$"),
+                       side: str = Query(..., pattern=r"^(BUY|SELL)$"),
+                       stop_loss: str = Query(..., max_length=24, pattern=_DECIMAL_TEXT),
+                       take_profit: Optional[str] = Query(None, max_length=24,
+                                                          pattern=_DECIMAL_TEXT),
+                       risk_pct: Optional[str] = Query(None, max_length=8,
+                                                       pattern=_DECIMAL_TEXT),
+                       session: Session = Depends(current_session)):
+        user = security.get_user(session.username)
+        if user is None or not user.can_write:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "this role cannot trade")
+        return runtime.manual_order(instrument=instrument, side=side, stop_loss=stop_loss,
+                                    take_profit=take_profit, risk_pct=risk_pct,
+                                    by=session.username, preview=True)
+
+    @app.post("/api/trade/manual")
+    def manual_ticket(body: ManualTicket,
+                      session: Session = Depends(require_write("manual_trade"))):
+        from ..core.config import ExecutionVenueMode
+        if runtime.agent.config.execution.venue_mode is ExecutionVenueMode.LIVE:
+            # Real money: owner only, on top of the TOTP the dependency checked.
+            user = security.get_user(session.username)
+            if user is None or not user.can_change_risk:
+                raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                    "only the owner may place a manual trade with real money")
+        return runtime.manual_order(instrument=body.instrument, side=body.side,
+                                    stop_loss=body.stop_loss, take_profit=body.take_profit,
+                                    risk_pct=body.risk_pct, by=session.username,
+                                    preview=False)
+
     @app.post("/api/control/flatten")
     def flatten(session: Session = Depends(require_write("flatten_all"))):
         return runtime.flatten_all(session.username)
@@ -917,6 +987,92 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
         status_after = gate.check(force=True)
         return {"installed": True, "licence": status_after.to_dict(),
                 "previous_kept_at": str(backup) if backup else None}
+
+    # -- AI assistants and news ---------------------------------------------- #
+
+    def _ai_or_409():
+        ai = getattr(runtime, "ai", None)
+        if ai is None:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "the AI assistants are not enabled in this build")
+        return ai
+
+    @app.get("/api/ai")
+    def ai_overview(session: Session = Depends(current_session)):
+        ai = getattr(runtime, "ai", None)
+        if ai is None:
+            return {"enabled": False}
+        user = security.get_user(session.username)
+        return {"enabled": True,
+                **ai.describe(include_private=bool(user and user.can_change_risk))}
+
+    @app.post("/api/ai/provider")
+    def ai_save_provider(body: AIProviderSave,
+                         session: Session = Depends(
+                             require_write("ai_provider", requires_owner=True))):
+        ai = _ai_or_409()
+        try:
+            return ai.save_provider(body.provider, enabled=body.enabled, model=body.model,
+                                    base_url=body.base_url, api_key=body.api_key,
+                                    by=session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:300])
+
+    @app.post("/api/ai/settings")
+    def ai_save_settings(body: AISettingsSave,
+                         session: Session = Depends(
+                             require_write("ai_settings", requires_owner=True))):
+        ai = _ai_or_409()
+        try:
+            return ai.save_settings(primary=body.primary, fallbacks=body.fallbacks,
+                                    purposes=body.purposes,
+                                    max_calls_per_hour=body.max_calls_per_hour,
+                                    max_calls_per_day=body.max_calls_per_day,
+                                    by=session.username)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)[:300])
+
+    @app.post("/api/ai/test")
+    def ai_test(body: AIProviderRef,
+                session: Session = Depends(require_write("ai_test", requires_owner=True))):
+        ai = _ai_or_409()
+        from ..ai import CATALOG
+        if body.provider not in CATALOG:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such provider")
+        return ai.test_provider(body.provider, by=session.username)
+
+    @app.get("/api/ai/insights")
+    def ai_insights(session: Session = Depends(current_session)):
+        ai = getattr(runtime, "ai", None)
+        coach = getattr(runtime, "coach", None)
+        desk = getattr(runtime, "news_desk", None)
+        return {
+            "reviews": ai.store.reviews(40) if ai is not None else [],
+            "themes": coach.themes() if coach is not None else None,
+            "brief": ai.store.latest_brief() if ai is not None else None,
+            "headlines": desk.headlines(40) if desk is not None else [],
+            "desk": desk.status.to_dict() if desk is not None else None,
+            "background_errors": list(getattr(runtime, "background_errors", []))[-5:],
+        }
+
+    @app.post("/api/ai/brief")
+    def ai_brief(session: Session = Depends(require_write("ai_brief"))):
+        ai = _ai_or_409()
+        from ..ai.coach import generate_brief
+        try:
+            return generate_brief(ai, runtime)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:300])
+
+    @app.post("/api/news/refresh")
+    def news_refresh(session: Session = Depends(require_write("news_refresh"))):
+        desk = getattr(runtime, "news_desk", None)
+        if desk is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "live news feeds are off")
+        now = wall_ns()
+        report = desk.refresh_calendar(now)
+        desk.refresh_feeds(now)
+        return {"calendar": report, "desk": desk.status.to_dict()}
 
     # -- live stream ---------------------------------------------------------- #
 

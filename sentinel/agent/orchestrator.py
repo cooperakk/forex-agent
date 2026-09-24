@@ -952,15 +952,24 @@ class Agent:
                 commission_per_lot_round_turn=cfg.execution.commission_per_lot_round_turn,
                 slippage_pips_median=cfg.execution.expected_slippage_pips)
 
+        # A period baseline of zero means "not captured yet" (the agent has
+        # not rolled its periods). Measuring against zero read the whole
+        # account as today's profit: +100%, the profit lock latched, and every
+        # entry was refused for a reason that was not true.
+        def _base(value: Decimal) -> Decimal:
+            return value if value > 0 else account.equity
+        day_base = _base(self.day_start_equity)
+        week_base = _base(self.week_start_equity)
+        month_base = _base(self.month_start_equity)
         return RiskContext(
             now_ns=now_ns, account=account, positions=positions, instruments=instruments,
             quotes=snap.quotes, conversions=conversions, equity_peak=self.equity_peak,
-            day_pnl=account.equity - self.day_start_equity,
-            day_start_equity=self.day_start_equity,
-            week_pnl=account.equity - self.week_start_equity,
-            month_pnl=account.equity - self.month_start_equity,
-            week_start_equity=self.week_start_equity,
-            month_start_equity=self.month_start_equity,
+            day_pnl=account.equity - day_base,
+            day_start_equity=day_base,
+            week_pnl=account.equity - week_base,
+            month_pnl=account.equity - month_base,
+            week_start_equity=week_base,
+            month_start_equity=month_base,
             rolling_24h_pnl=self._rolling_24h_pnl(now_ns, account.equity),
             day_profit_locked=self.day_profit_locked,
             ladder_rung=self._ladder_rung,
@@ -2137,6 +2146,163 @@ class Agent:
         target.risk_pct = str(intent.risk_pct)
         target.diagnostics["caution_multiplier"] = round(caution, 4)
         return self._execute(intent, target, quote)
+
+    # ------------------------------------------------------------------ #
+    # manual trading
+    # ------------------------------------------------------------------ #
+
+    MANUAL_STRATEGY = "manual"
+
+    def manual_order(self, *, instrument: str, side: str, stop_loss: Decimal,
+                     take_profit: Optional[Decimal], by: str,
+                     risk_pct: Optional[Decimal] = None,
+                     preview: bool = False) -> Decision:
+        """A human's own trade, through the same gates as the agent's.
+
+        The ticket names the instrument, the side, the stop (required) and
+        optionally a target and a LOWER risk percentage. Everything else is the
+        system's: the size comes from the risk budget, and every veto the
+        engine has -- loss budgets, drawdown ladder, news blackout, spread,
+        exposure, margin, the unprotected-book rule -- applies unchanged. There
+        is no override. The only thing a human ticket is excused from is the
+        strategy LIFECYCLE rule, and with real money only when the owner has
+        turned ``agent.manual_trading_live`` on.
+
+        ``preview=True`` evaluates everything and sends nothing.
+        """
+        now = self.now()
+        decision = Decision(ts_ns=now, strategy=self.MANUAL_STRATEGY,
+                            instrument=instrument, action="skipped", side=side,
+                            rationale=f"manual ticket by {by}")
+        try:
+            side_enum = Side(str(side).upper())
+        except ValueError:
+            decision.vetoes = [{"rule": "malformed_ticket",
+                                "message": "side must be BUY or SELL", "severity": "block"}]
+            return decision
+        live = self.config.execution.venue_mode is ExecutionVenueMode.LIVE
+        if live and not self.config.agent.manual_trading_live:
+            decision.action = "vetoed"
+            decision.vetoes = [{
+                "rule": "manual_live_disabled",
+                "message": ("manual trades with real money are switched off; the owner "
+                            "must enable agent.manual_trading_live first"),
+                "severity": "block"}]
+            return decision
+        permitted, why = self.entry_permission()
+        if not permitted:
+            decision.action = "vetoed"
+            decision.vetoes = [{"rule": "licence", "message": why, "severity": "block"}]
+            return decision
+        if not self._in_session(now):
+            decision.action = "vetoed"
+            decision.vetoes = [{
+                "rule": "out_of_session",
+                "message": ("entries are not permitted at this hour/day; the permitted "
+                            "hours are agent.session_windows_utc and agent.trade_days"),
+                "severity": "block"}]
+            return decision
+
+        snap = self.feed.snapshot([instrument], now_ns=now)
+        quote = snap.quotes.get(instrument)
+        inst = self.broker.instruments().get(instrument)
+        if quote is None or inst is None:
+            decision.action = "vetoed"
+            decision.vetoes = [{"rule": "no_market",
+                                "message": f"no instrument or live price for {instrument}",
+                                "severity": "block"}]
+            return decision
+        ctx = self._build_context(now, self.broker.account(),
+                                  self._hydrate(self.broker.positions()), snap,
+                                  self.health.connected, self.health.snapshot())
+        # The ticket is judged as an accepted strategy ONLY for the lifecycle
+        # rule, and only when the checks above allowed a manual ticket at all.
+        ctx.strategy_lifecycles = {**ctx.strategy_lifecycles,
+                                   self.MANUAL_STRATEGY: "accepted"}
+        coid = client_order_id(strategy=self.MANUAL_STRATEGY, instrument=instrument,
+                               side=side_enum.value, decision_ns=now,
+                               account=ctx.account.account_id)
+        decision.client_order_id = coid
+        try:
+            intent = OrderIntent(
+                client_order_id=coid, strategy=self.MANUAL_STRATEGY, instrument=instrument,
+                side=side_enum, lots=inst.min_lot,
+                stop_loss=inst.round_price(dec(stop_loss)),
+                take_profit=inst.round_price(dec(take_profit)) if take_profit else None,
+                decision_ns=now, reason=f"manual ticket by {by}"[:100])
+        except (ValueError, InvalidOperation) as exc:
+            decision.action = "vetoed"
+            decision.vetoes = [{"rule": "malformed_ticket", "message": str(exc),
+                                "severity": "block"}]
+            return decision
+
+        verdict = self.risk.evaluate_entry(intent, ctx)
+        decision.vetoes = [v.to_dict() for v in verdict.vetoes]
+        decision.warnings = [w.to_dict() for w in verdict.warnings]
+        decision.diagnostics = dict(verdict.diagnostics)
+        decision.entry = str(quote.price_for(side_enum))
+        decision.stop = str(intent.stop_loss)
+        decision.target = str(intent.take_profit) if intent.take_profit else None
+        if not verdict.approved:
+            decision.action = "vetoed"
+            decision.explanation = "; ".join(
+                f"{v.rule}: {v.message}" for v in verdict.vetoes[:4])
+            if not preview:
+                self.audit.append(EventType.RISK_VETO, {**decision.to_dict(),
+                                                        "manual": True}, actor=by)
+            return decision
+
+        # A human may ask for LESS risk than the budget, never more. News and
+        # lessons shrink a manual ticket exactly as they shrink the agent's.
+        regime_name = self.regime.regime.value if self.regime else ""
+        caution, reasons = self._caution_for(self.MANUAL_STRATEGY, instrument, regime_name)
+        budget = self.config.risk.risk_per_trade_pct
+        if risk_pct is not None:
+            wanted = dec(risk_pct)
+            if wanted <= 0:
+                decision.action = "vetoed"
+                decision.vetoes = [{"rule": "malformed_ticket",
+                                    "message": "risk must be greater than zero",
+                                    "severity": "block"}]
+                return decision
+            if wanted < budget:
+                caution = min(caution, float(wanted / budget))
+                reasons.append(f"risk lowered by the ticket to {wanted}%")
+        lots = inst.round_lots_down(verdict.approved_lots * dec(caution))
+        decision.lessons = reasons
+        decision.diagnostics["caution_multiplier"] = round(caution, 4)
+        if lots < inst.min_lot:
+            decision.action = "vetoed"
+            decision.vetoes.append({
+                "rule": "caution_multiplier",
+                "message": f"the requested risk sizes to {lots} lots, below the "
+                           f"{inst.min_lot} minimum",
+                "severity": "block"})
+            return decision
+        intent.lots = lots
+        intent.risk_amount = verdict.risk_amount * dec(caution)
+        intent.risk_pct = verdict.risk_pct * dec(caution)
+        intent.expected_cost_pips = verdict.expected_cost_pips
+        decision.lots = str(lots)
+        decision.risk_amount = str(intent.risk_amount)
+        decision.risk_pct = str(intent.risk_pct)
+        be = verdict.break_even_win_rate
+        decision.explanation = (
+            f"manual {side_enum.value} {instrument}: {lots} lots, risk "
+            f"{float(intent.risk_pct):.2f}% of equity"
+            + (f"; needs {float(be) * 100:.1f}% wins to break even after costs"
+               if be is not None else ""))
+        if preview:
+            decision.action = "preview"
+            return decision
+        self.audit.append(EventType.PROPOSAL_ACCEPTED, {
+            "manual_ticket": True, "client_order_id": coid, "instrument": instrument,
+            "side": side_enum.value, "lots": str(lots), "stop": str(intent.stop_loss),
+            "target": str(intent.take_profit) if intent.take_profit else None,
+            "risk_pct": str(intent.risk_pct)}, actor=by)
+        result = self._execute(intent, decision, quote)
+        self.decisions.append(result)
+        return result
 
     def reject_advice(self, client_order_id: str, by: str, reason: str = "") -> bool:
         target = next((d for d in self._advisory_queue if d.client_order_id == client_order_id),

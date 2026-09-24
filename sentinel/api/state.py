@@ -88,6 +88,15 @@ class Runtime:
         self._connections = None
         self._secrets = None
         self._secrets_error = ""
+        # Optional assistants, wired by bootstrap. Each runs on the background
+        # worker, never on the decision thread, and each can only inform a
+        # human or shrink risk.
+        self.ai = None           # sentinel.ai.AIService
+        self.news_desk = None    # sentinel.news.desk.NewsDesk
+        self.coach = None        # sentinel.ai.coach.TradeCoach
+        self._bg_thread: Optional[threading.Thread] = None
+        self.background_errors: List[str] = []
+        self.background_last_ns: int = 0
 
     # -- venue configuration -------------------------------------------------- #
 
@@ -419,6 +428,32 @@ class Runtime:
 
             self._thread = threading.Thread(target=loop, name="agent-loop", daemon=True)
             self._thread.start()
+
+            if self.news_desk is not None or self.coach is not None:
+                def background() -> None:
+                    # First pass soon after start, then once a minute; each
+                    # assistant decides for itself whether it is due.
+                    delay = 5.0
+                    while not self._stop.wait(delay):
+                        delay = 60.0
+                        self.background_tick()
+
+                self._bg_thread = threading.Thread(target=background,
+                                                   name="assistants", daemon=True)
+                self._bg_thread.start()
+
+    def background_tick(self) -> None:
+        """One pass of the news desk and the coach. Never takes the trading lock."""
+        self.background_last_ns = wall_ns()
+        for name, step in (("news", getattr(self.news_desk, "tick", None)),
+                           ("coach", getattr(self.coach, "tick", None))):
+            if step is None:
+                continue
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 - an assistant must never stop anything
+                msg = f"{name}: {type(exc).__name__}: {exc}"[:300]
+                self.background_errors = (self.background_errors + [msg])[-20:]
 
     def stop(self) -> None:
         self._stop.set()
@@ -784,6 +819,17 @@ class Runtime:
                 if remaining is not None:
                     self._forget_closed(remaining)
         return {"state": res.state.value, "reason": res.reject_reason}
+
+    def manual_order(self, *, instrument: str, side: str, stop_loss, take_profit,
+                     risk_pct, by: str, preview: bool) -> dict:
+        from ..core.money import dec as _dec
+        with self._lock:
+            decision = self.agent.manual_order(
+                instrument=instrument, side=side, stop_loss=_dec(stop_loss),
+                take_profit=_dec(take_profit) if take_profit not in (None, "") else None,
+                risk_pct=_dec(risk_pct) if risk_pct not in (None, "") else None,
+                by=by, preview=preview)
+        return decision.to_dict()
 
     def _forget_closed(self, still_open: List[str]) -> None:
         """Drop the agent's metadata for positions a human just closed.
