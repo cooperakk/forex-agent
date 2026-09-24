@@ -50,3 +50,40 @@ def test_shell_scripts_parse():
     for path in _files(("*.sh",)):
         result = subprocess.run([bash, "-n", str(path)], capture_output=True, text=True)
         assert result.returncode == 0, f"{path.relative_to(ROOT)}: {result.stderr}"
+
+
+def test_powershell_scripts_are_ascii():
+    """Windows PowerShell 5.1 reads a BOM-less .ps1 in the ANSI code page, so
+    one non-ASCII character is mis-decoded on a Persian or Chinese Windows."""
+    offenders = [str(p.relative_to(ROOT)) for p in _files(("*.ps1",))
+                 if any(b > 127 for b in p.read_bytes())]
+    assert not offenders, "non-ASCII PowerShell: " + ", ".join(sorted(offenders))
+
+
+def test_powershell_scripts_parse(tmp_path):
+    import os
+    import shutil
+    import subprocess
+
+    pwsh = os.environ.get("SENTINEL_PWSH") or shutil.which("pwsh")
+    if not pwsh:
+        import pytest
+        pytest.skip("PowerShell (pwsh) is not installed; set SENTINEL_PWSH to run this")
+    script = (
+        "$bad = 0; foreach ($f in Get-ChildItem -Path $args[0] -Filter *.ps1 -Recurse) {"
+        " $t = $null; $e = $null;"
+        " [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)"
+        " | Out-Null; foreach ($x in $e) { Write-Output ($f.Name + ': ' + $x.Message); $bad++ } };"
+        " exit $bad")
+    checker = tmp_path / "parse.ps1"
+    checker.write_text(script, encoding="ascii")
+    result = subprocess.run([pwsh, "-NoProfile", "-File", str(checker), str(ROOT / "deploy")],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_windows_cmd_wrappers_point_at_existing_scripts():
+    for cmd in (ROOT / "deploy" / "windows").glob("*.cmd"):
+        target = cmd.with_suffix(".ps1")
+        assert target.is_file(), f"{cmd.name} wraps a missing {target.name}"
+        assert f"%~dp0{target.name}" in cmd.read_text(), cmd.name
