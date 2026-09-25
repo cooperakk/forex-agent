@@ -315,13 +315,17 @@ class TestProbe:
 
 
 def _probed(conn, ok=True, finished_ns=None, account_id="PAPER-001"):
-    # The SUMMARY shape the store persists: no balance, masked id at the top
-    # level. The raw report is never written to disk or sent to a dashboard.
+    # The SUMMARY shape the store persists: no balance, the account number
+    # masked, and its fingerprint for comparison. This helper once stored the
+    # number unmasked -- which the store never does -- and so hid that every
+    # real account failed the "same account" check.
+    from sentinel.brokers.connection import _mask_login, account_fingerprint
     conn.last_probe = {
         "ok": ok, "blocking_failures": [] if ok else ["connect"],
         "finished_ns": finished_ns if finished_ns is not None
         else int(dt.datetime.now(UTC).timestamp() * 1e9),
-        "account_id": account_id, "checks": [],
+        "account_id": _mask_login(account_id), "account_ref": account_fingerprint(account_id),
+        "checks": [],
     }
     return conn
 

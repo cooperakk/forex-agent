@@ -15,6 +15,14 @@ wrong account. A mismatch raises ``BrokerError`` and nothing is forwarded.
 The check is one ``account_info`` round trip per call. On a local terminal
 that is microseconds; over the bridge it is one extra message, which is the
 right price for never trading the wrong account.
+
+An empty account id or currency is not checked. Bootstrap uses exactly that
+-- a binding with only the venue mode -- for an external venue whose
+configuration declares no account: whichever account the terminal is signed
+into, a configuration that is not in live mode must never trade real money.
+Before 1.8.2 such a configuration traded a real-money account with every
+live-only gate (the acceptance lifecycle above all) switched off, because
+those gates read the configured mode and not the account.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ from ..core.types import AccountState
 
 class AccountBoundBroker:
     def __init__(self, broker: Any, account_id: str, account_type: str, currency: str,
-                 server: str = "") -> None:
+                 server: str = "", *, strict_start: bool = True) -> None:
         self._broker = broker
         self._account_id = str(account_id)
         self._account_type = str(account_type)
@@ -36,16 +44,25 @@ class AccountBoundBroker:
         self.capabilities = broker.capabilities
         self.bound_to = {"account_id": self._account_id, "account_type": self._account_type,
                          "currency": self._currency, "server": self._server}
-        self._check()
+        try:
+            self._check()
+        except Exception as exc:  # noqa: BLE001
+            # A declared account is verified before the engine starts. The
+            # mode-only guard (strict_start=False) refuses to start on a
+            # mismatch too -- a real-money account under a non-live
+            # configuration -- but an account that merely cannot be read yet
+            # is checked again on every call instead of failing the boot.
+            if strict_start or getattr(exc, "code", None) == "ACCOUNT_MISMATCH":
+                raise
 
     # -- the guard ---------------------------------------------------------- #
 
     def _check(self) -> AccountState:
         account = self._broker.account()
         problems = []
-        if str(account.account_id) != self._account_id:
+        if self._account_id and str(account.account_id) != self._account_id:
             problems.append(f"account {account.account_id!r} != bound {self._account_id!r}")
-        if str(account.currency).upper() != self._currency:
+        if self._currency and str(account.currency).upper() != self._currency:
             problems.append(f"currency {account.currency!r} != bound {self._currency!r}")
         # The venue mode "paper"/"demo"/"live" is compared against what the
         # venue REPORTS. A venue that reports nothing ("") cannot be bound to
@@ -55,6 +72,9 @@ class AccountBoundBroker:
             problems.append(f"venue reports {reported or 'unknown'!r} account, bound to live")
         if self._account_type == "demo" and reported not in ("demo", ""):
             problems.append(f"venue reports {reported!r} account, bound to demo")
+        if self._account_type == "paper" and reported == "live":
+            problems.append("venue reports a live (real-money) account, but the "
+                            "configuration is not in live mode")
         if self._server:
             terminal = getattr(self._broker, "_mt5", None)
             if terminal is not None:

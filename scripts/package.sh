@@ -51,11 +51,15 @@ cp docs/INSTALL-FA.md "$DEST/START-HERE-FA.md"
 # who has never installed a server opens before anything else.
 cp docs/WINDOWS-GUIDE-FA.md "$DEST/00-WINDOWS-GUIDE-FA.md"
 cp docs/ALPARI-MT5-FA.md "$DEST/ALPARI-MT5-FA.md"
+# How to use the console once it is installed: where trade suggestions appear,
+# what each page does. Its screenshots are embedded by render_guide.py.
+cp docs/PANEL-GUIDE-FA.md "$DEST/01-PANEL-GUIDE-FA.md"
 if "$PY" -c "import markdown" 2>/dev/null; then
     "$PY" scripts/render_guide.py docs/WINDOWS-GUIDE-FA.md "$DEST/00-WINDOWS-GUIDE-FA.html"
     "$PY" scripts/render_guide.py docs/INSTALL-FA.md "$DEST/START-HERE-FA.html"
     "$PY" scripts/render_guide.py docs/RAHNAMA-FA.md "$DEST/docs/RAHNAMA-FA.html"
     "$PY" scripts/render_guide.py docs/ALPARI-MT5-FA.md "$DEST/ALPARI-MT5-FA.html"
+    "$PY" scripts/render_guide.py docs/PANEL-GUIDE-FA.md "$DEST/01-PANEL-GUIDE-FA.html"
 else
     echo "[package] note: 'markdown' is not installed; the HTML guide is skipped"
 fi

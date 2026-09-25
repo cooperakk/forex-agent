@@ -178,8 +178,8 @@ export default function Overview({ snap }: { snap: Snapshot }) {
             <div className="stack gap8">
               <div className="row gap8 wrap">
                 <Chip tone="solid">{MODE_LABEL[status.mode]}</Chip>
-                <Chip tone={status.venue_mode === "live" ? "neg" : "info"}>
-                  {VENUE_LABEL[status.venue_mode]}
+                <Chip tone={(status.venue_effective ?? status.venue_mode) === "live" ? "neg" : "info"}>
+                  {VENUE_LABEL[status.venue_effective ?? status.venue_mode]}
                 </Chip>
                 <Chip tone={status.halted || status.kill_switch.engaged ? "neg" : "pos"}>
                   <i className="dot" />{status.halted ? "متوقف" : "فعال"}

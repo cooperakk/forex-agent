@@ -1,9 +1,12 @@
 import React, { useMemo, useState } from "react";
 import { BarsH, BarsV, Heatmap, Histogram, Scatter } from "../components/charts";
 import {
-  Banner, Card, Chip, Disclosure, Empty, Hint, KV, Seg, Tile, dt, money,
+  Banner, Card, Chip, Disclosure, Empty, Hint, KV, Seg, Tile, dt, fa, money,
 } from "../components/ui";
 import type { Snapshot, Trade } from "../types";
+
+const MONTH_FA = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+                  "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
 
 /* Why a trade ended, said the way a person would say it out loud. */
 const EXIT_FA: Record<string, string> = {
@@ -21,7 +24,7 @@ const REGIME_FA: Record<string, string> = {
 };
 
 export default function Journal({ snap }: { snap: Snapshot }) {
-  const { trades, performance, monthly } = snap;
+  const { trades, performance, monthly, monthlyInfo } = snap;
   const [filter, setFilter] = useState<"all" | "win" | "loss">("all");
   const [strategy, setStrategy] = useState<string>("all");
   const [selected, setSelected] = useState<Trade | null>(null);
@@ -163,11 +166,32 @@ export default function Journal({ snap }: { snap: Snapshot }) {
               hint={<>هر خانه یک ماه است. ۱٫۲ یعنی آن ماه ۱٫۲٪ به حساب اضافه شده و ‎−۰٫۸ یعنی
                 ۰٫۸٪ کم شده. خانه خالی یعنی آن ماه داده‌ای نداریم.</>}
               sub="بر حسب درصد، به تفکیک ماه‌های سال شمسی">
-          <Heatmap
-            rows={monthly.map((m) => String(m.year))}
-            cols={["فرو", "ارد", "خرد", "تیر", "مرد", "شهر", "مهر", "آبا", "آذر", "دی", "بهم", "اسف"]}
-            cells={monthly.map((m) => m.months)}
-            fmt={(v) => v.toFixed(1)} />
+          {monthly.length === 0 ? (
+            <Empty>
+              {monthlyInfo.source === "unavailable"
+                ? "این جدول از سرور خوانده نشد؛ صفحه را تازه کنید."
+                : "هنوز داده‌ای ثبت نشده. ربات از این نسخه به بعد پول حساب را روزبه‌روز ثبت می‌کند و این جدول ماه‌به‌ماه پر می‌شود."}
+            </Empty>
+          ) : (
+            <Heatmap
+              rows={monthly.map((m) => String(m.year))}
+              cols={["فرو", "ارد", "خرد", "تیر", "مرد", "شهر", "مهر", "آبا", "آذر", "دی", "بهم", "اسف"]}
+              cells={monthly.map((m) => m.months)}
+              fmt={(v) => v.toFixed(1)} />
+          )}
+          {monthlyInfo.source === "ledger" && monthly.length > 0 && (
+            <div className="fs11 faint mt8" style={{ lineHeight: 1.8 }}>
+              از پول حساب در پایان هر ماه، نسبت به پایان ماه قبل. ثبت از{" "}
+              {monthlyInfo.since_ns ? dt(monthlyInfo.since_ns) : "—"}.
+              {monthlyInfo.partial.length > 0 && <>
+                {monthlyInfo.partial.length === 1 ? " ماه " : " ماه‌های "}
+                {monthlyInfo.partial.map((m) => `${MONTH_FA[m.month - 1]} ${fa(m.year)}`).join("، ")}
+                {monthlyInfo.partial.length === 1
+                  ? " کامل نیست: از اولین روزِ ثبت‌شده (یا از روز عوض شدن حساب) حساب شده است."
+                  : " کامل نیستند: از اولین روزِ ثبت‌شده (یا از روز عوض شدن حساب) حساب شده‌اند."}</>}
+              {" "}واریز و برداشت از این عددها جدا نشده است.
+            </div>
+          )}
         </Card>
       </div>
 

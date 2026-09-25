@@ -356,8 +356,17 @@ def build_runtime(config_path: str | Path = "var/config.json",
                 "refuse to route orders when the terminal's account changes")
         else:
             print("[bootstrap] WARNING: no expected_account_id -- the engine will trade "
-                  "whichever account the terminal is signed into. Set it before demo "
-                  "testing with real broker credentials.")
+                  "whichever account the terminal is signed into. Activate the "
+                  "connection from the dashboard to bind it to one account.")
+            # No identity to bind to, but the MODE still binds: a configuration
+            # that is not live must never route to a real-money account, because
+            # every live-only gate reads the configured mode, not the account.
+            from .brokers.bound import AccountBoundBroker
+            broker = AccountBoundBroker(broker, "", config.execution.venue_mode.value, "",
+                                        strict_start=False)
+            audit.append(EventType.SYSTEM_START,
+                         {"account_bound": broker.bound_to, "identity": "unbound"},
+                         actor="bootstrap")
 
     store = BarStore(config.data.store_path)
     # The paper venue has no price source of its own: it is a fill engine. The

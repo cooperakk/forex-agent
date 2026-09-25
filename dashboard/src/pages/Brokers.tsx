@@ -99,9 +99,14 @@ export default function Brokers({ provider, write, readOnly, canAdminister }: Pr
         <div className="kv-grid">
           <KV k="پروفایل فعال" v={<span className="mono">{data.active_profile}</span>} />
           <KV k="نوع حساب"
-              v={<Chip tone={data.venue_mode === "live" ? "neg" : "info"}>
-                {data.venue_mode === "live" ? "پول واقعی"
-                  : data.venue_mode === "demo" ? "تمرینی — حساب دمو" : "تمرینی — شبیه‌ساز"}
+              hint={<>چیزی که همین حالا واقعاً وصل است: شبیه‌ساز داخلی، یا نوعی که خود حساب نزد
+                بروکر گزارش می‌کند. بعد از فعال کردن یک بروکر تازه، تا راه‌اندازی دوباره همان
+                قبلی را نشان می‌دهد.</>}
+              v={<Chip tone={(data.venue_effective ?? data.venue_mode) === "live" ? "neg" : "info"}>
+                {(data.venue_effective ?? data.venue_mode) === "live" ? "پول واقعی"
+                  : (data.venue_effective ?? data.venue_mode) === "demo" ? "تمرینی — حساب دمو"
+                  : "تمرینی — شبیه‌ساز"}
+                {data.venue_source === "config" ? " (اعلام‌شده)" : ""}
               </Chip>} />
           <KV k="معاملهٔ باز" v={<span className="num">{data.open_positions}</span>}
               hint={<>تا وقتی معاملهٔ باز دارید، عوض کردن بروکر ممکن نیست. آن
