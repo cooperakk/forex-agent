@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Docs -- a complete, plain-Persian guide to the console
+
+- `docs/PANEL-GUIDE-FA.md` (shipped as `01-PANEL-GUIDE-FA.md` / `.html` at the
+  top of the package) explains, with a screenshot of every page:
+  - what the agent is made of, as one decision cycle from prices to
+    protection;
+  - signing in, the six-digit code, the 30-minute session (`401`) and the
+    lockout after five wrong codes;
+  - where trade suggestions appear and how to get the first one, step by step;
+  - why none appear: kill switch, observe mode, hours (10:30-19:30 Tehran,
+    Monday-Friday), H4 bars, vetoes;
+  - how to read, approve and reject a suggestion;
+  - the four modes, and simulator versus demo versus live;
+  - connecting Alpari;
+  - every page, a daily routine, and a troubleshooting table.
+- The guide says plainly where the console shows sample numbers on a live
+  install (the top of "testing and proof", the monthly table in the trade
+  history) and that a halted agent has no resume button yet.
+- The Windows, Alpari and install guides now use the real button labels
+  («افزودن دستی», «فعال کن»). They also tell the reader to restart once after
+  activating a broker: activation is applied at the next start, which the
+  dashboard said but the guides did not.
+- `scripts/render_guide.py` embeds local images as `data:` URIs inside
+  captioned figures, so a rendered guide still opens offline with a
+  double-click. A missing image fails the build.
+
 ## 1.8.1 -- 2026-09-25
 
 ### Fixed -- the engine did not stay up on Windows

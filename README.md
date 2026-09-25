@@ -77,6 +77,9 @@ sudo ./deploy/scripts/install.sh
 📘 **راهنمای کامل فارسی برای کسی که با بازار آشنا نیست:**
 [`docs/RAHNAMA-FA.md`](docs/RAHNAMA-FA.md)
 
+🖥️ **راهنمای کامل پنل با عکس — پیشنهاد معامله کجا می‌آید، هر صفحه چه می‌کند:**
+[`docs/PANEL-GUIDE-FA.md`](docs/PANEL-GUIDE-FA.md)
+
 <details>
 <summary>نصب دستی (برای توسعه)</summary>
 
@@ -203,6 +206,7 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 | [`docs/ACCEPTANCE-PROTOCOL.md`](docs/ACCEPTANCE-PROTOCOL.md) | تنها مسیر مجاز به پول واقعی |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | استقرار محلی، Docker، systemd |
 | [`docs/RAHNAMA-FA.md`](docs/RAHNAMA-FA.md) | **راهنمای ساده فارسی — از اینجا شروع کنید** |
+| [`docs/PANEL-GUIDE-FA.md`](docs/PANEL-GUIDE-FA.md) | **راهنمای کامل پنل با عکس: بخش‌های ربات، گرفتن پیشنهاد، همهٔ صفحه‌ها** |
 | [`docs/INSTALL-FA.md`](docs/INSTALL-FA.md) | **نصب قدم‌به‌قدم، بررسی محیط و عیب‌یابی (ویندوز و لینوکس)** |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | وقتی چیزی خراب شد چه کنید |
 | [`docs/LICENSING.md`](docs/LICENSING.md) | سامانه لایسنس، و مرزهای واقعی محافظت |

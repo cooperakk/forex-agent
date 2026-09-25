@@ -44,7 +44,42 @@ th { background: var(--card); }
 blockquote { margin: 16px 0; padding: 10px 16px; border-inline-start: 4px solid var(--accent);
              background: var(--card); border-radius: 8px; }
 hr { border: 0; border-top: 1px solid var(--line); margin: 24px 0; }
+figure { margin: 16px 0; }
+figure img { display: block; max-width: 100%; height: auto; margin: 0 auto;
+             border: 1px solid var(--line); border-radius: 10px; }
+figcaption { text-align: center; color: var(--muted); font-size: .9rem; margin-top: 6px; }
 """
+
+_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+         ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
+
+
+def _inline_images(body: str, base: Path) -> str:
+    """Embed every local image as a data: URI, each in a captioned figure.
+
+    The page must open with a double-click on a machine with no internet and
+    no copy of docs/img beside it, so a relative src is not good enough. A
+    missing image fails the build: a guide that says "look at this picture"
+    over a broken icon is worse than one without pictures.
+    """
+    import base64
+    import re
+
+    def figure(m: "re.Match[str]") -> str:
+        tag = m.group(1)
+        src = re.search(r'src="([^"]+)"', tag)
+        alt = re.search(r'alt="([^"]*)"', tag)
+        if src and not re.match(r"(?i)(https?:|data:)", src.group(1)):
+            path = (base / html.unescape(src.group(1))).resolve()
+            if not path.is_file():
+                raise SystemExit(f"image not found: {path}")
+            mime = _MIME.get(path.suffix.lower(), "application/octet-stream")
+            data = base64.b64encode(path.read_bytes()).decode("ascii")
+            tag = tag.replace(src.group(0), f'src="data:{mime};base64,{data}"')
+        caption = f"<figcaption>{alt.group(1)}</figcaption>" if alt and alt.group(1) else ""
+        return f"<figure>{tag}{caption}</figure>"
+
+    return re.sub(r"<p>\s*(<img [^>]*>)\s*</p>", figure, body)
 
 
 def render(source: Path) -> str:
@@ -54,6 +89,7 @@ def render(source: Path) -> str:
         raise SystemExit("the 'markdown' package is needed to render the guide") from None
     text = source.read_text(encoding="utf-8")
     body = markdown.markdown(text, extensions=["tables", "fenced_code"], output_format="html")
+    body = _inline_images(body, source.parent)
     title = next((line.lstrip("# ").strip() for line in text.splitlines()
                   if line.startswith("# ")), "Sentinel-FX")
     return ("<!doctype html>\n<html lang=\"fa\" dir=\"rtl\">\n<head>\n<meta charset=\"utf-8\">\n"
