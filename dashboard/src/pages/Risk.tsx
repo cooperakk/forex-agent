@@ -1,12 +1,20 @@
 import React from "react";
 import { BarsV, DivergingBars, Gauge, LineChart } from "../components/charts";
-import { Banner, Card, Chip, Disclosure, Hint, KV, Tile, money, pct } from "../components/ui";
+import { Banner, Card, Chip, Disclosure, Hint, KV, Tile, fa, money, pct } from "../components/ui";
 import type { Snapshot } from "../types";
 
 export default function Risk({ snap }: { snap: Snapshot }) {
   const { risk, performance, status, equity } = snap;
   const eq = Number(status.account.equity ?? 0);
   const lim = risk.limits;
+  // The capital table is computed at this risk per trade; say which.
+  const riskPct = snap.capitalRiskPct;
+  const riskIsConfig = Number(snap.config?.risk?.risk_per_trade_pct) === riskPct;
+  // A worked example that always shows the smallest trade overshooting: a
+  // 50-pip stop at 0.01 lot risks $5, so the account must be small enough
+  // that $5 is more than the intended risk.
+  const exampleEquity = riskPct < 1 ? 500 : 200;
+  const example = { equity: exampleEquity, actualPct: (5 / exampleEquity) * 100 };
 
   const ladderPoints = [{ x: 0, y: 1 }, ...risk.ladder.map((l) => ({ x: l.drawdown_pct, y: l.risk_multiplier }))];
   const currentStep = risk.ladder.filter((l) => risk.drawdown_pct >= l.drawdown_pct).slice(-1)[0];
@@ -308,10 +316,23 @@ export default function Risk({ snap }: { snap: Snapshot }) {
         <Banner tone="flat" icon="ℹ">
           دو خواسته در جهت مخالف هم فشار می‌آورند: حد ضرر دورتر از نظر هزینه بهتر است، ولی
           سرمایه بیشتری می‌خواهد. اگر هر دو با هم حل نشوند، چیزی که اتفاق می‌افتد این است:
-          می‌خواستید ۰٫۵٪ ریسک کنید (۵۰ دلار روی حساب ۱۰٬۰۰۰ دلاری)، ولی چون حجم را مجبورید
-          به ۰٫۰۱ لات گرد کنید، در عمل ۱٫۵٪ (۱۵۰ دلار) ریسک می‌کنید — بی‌آنکه جایی نوشته شود.
+          روی حساب {faNum(example.equity)} دلاری می‌خواستید {faNum(riskPct)}٪ ریسک کنید
+          ({faNum(example.equity * riskPct / 100)} دلار)، ولی با حد ضرر ۵۰ پیپ کوچک‌ترین حجم
+          ممکن (۰٫۰۱ لات) خودش ۵ دلار ریسک دارد؛ یعنی در عمل {faNum(example.actualPct)}٪ ریسک
+          می‌کنید — بی‌آنکه جایی نوشته شود.
+          <div className="fs11 faint mt8">
+            حساب این نمودار با ریسک {faNum(riskPct)}٪ در هر معامله است
+            {riskIsConfig ? " (همان عددی که در تنظیمات شماست)" : ""}: حداقل سرمایه = فاصله حد ضرر
+            × ۰٫۱ دلار (ارزش هر پیپِ ۰٫۰۱ لات) ÷ (۲۰٪ × درصد ریسک). یعنی کوچک‌ترین حجم ممکن
+            حداکثر یک‌پنجم ریسکی باشد که می‌خواهید.
+          </div>
         </Banner>
       </Card>
     </div>
   );
+}
+
+/** A number in Persian digits with the Persian decimal separator, no trailing zeros. */
+function faNum(v: number) {
+  return fa(String(+v.toFixed(2))).replace(".", "٫");
 }

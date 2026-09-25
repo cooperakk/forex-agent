@@ -1,6 +1,82 @@
 # Changelog
 
-## Unreleased
+## 1.8.2 -- 2026-09-25
+
+### Fixed -- no MetaTrader account with an account number could be activated
+
+- The connection test stores its summary with the account number masked
+  ("•••••678"). The activation gate compared that mask with the full number,
+  so every real account read as "a different account", and «فعال کن»
+  refused it.
+- The summary now also stores a fingerprint of the number, and the gate
+  compares fingerprints. A summary written before 1.8.2 is compared masked.
+- The tests' probe helper had stored the number unmasked, which the store
+  never does; that is why they missed it. It now builds the real shape.
+
+### Fixed -- the console called an activated demo «تمرینی — شبیه‌ساز»
+
+- The account-type label (header, overview, brokers page, the phone status
+  reply) follows what is actually running: the internal simulator, or the
+  account type the venue itself reports (MT5 trade mode). It falls back to
+  the configured mode only when the venue does not say.
+  `/api/status` and `/api/brokers` report `venue_effective` and
+  `venue_source` for this.
+- Activation now writes everything it had verified, all applied at the next
+  start:
+  - the account binding (`expected_account_id`, `expected_account_server`,
+    and `account_currency` as the probe observed it, so a cent account binds
+    as USC);
+  - for a demo or simulator connection, the venue mode.
+- The venue mode never moves to live on this path. A connection declared
+  live leaves it where it is.
+
+### Fixed -- a real-money account under a non-live configuration
+
+- An external venue with no declared account was not bound at all, so it
+  traded whichever account the terminal was signed into. On a real-money
+  account under a paper or demo configuration, every live-only gate (the
+  acceptance lifecycle above all) was off, because those gates read the
+  configured mode, not the account.
+- Bootstrap now binds such a venue by mode alone. A non-live configuration
+  refuses a live account: at startup if the terminal is already on one, and
+  on every call if it switches to one later. An account that simply cannot
+  be read yet is re-checked on every call instead of failing the boot.
+- If you meant to trade real money, that takes live mode, which needs every
+  enabled strategy accepted.
+
+### Fixed -- a live install showed the demo's research and monthly figures
+
+- The live provider filled several things from the bundled demo dataset:
+  - the acceptance gates, the CPCV paths and the Research page's PBO / DSR
+    tiles;
+  - the monthly-returns table;
+  - the capital table.
+  A real install showed a made-up verdict and a made-up year of results as
+  the owner's.
+- The Research page now reads the newest stored verdict
+  (`/api/research/latest`). With none stored it says «هنوز هیچ آزمون پذیرشی
+  اجرا نشده» and shows no numbers. It also says when the verdict belongs to
+  a configuration that is no longer running. Gate names are shown in
+  Persian.
+- Monthly returns come from a new durable ledger
+  (`var/equity-days.db`, `sentinel/ops/equity_ledger.py`):
+  - it keeps one row per Tehran day, with first and last equity and the
+    account;
+  - `/api/performance/monthly` returns month-end over previous month-end,
+    by Persian month;
+  - a month whose history starts inside it, or whose account changed, is
+    flagged partial and never bridged across accounts;
+  - deposits and withdrawals are not separated, and the page says so.
+
+  The in-memory equity curve is capped at about two weeks and lost at every
+  restart, so it could not honestly carry a month.
+- `sentinel/core/jalali.py` converts to the Persian calendar with no
+  dependency. It agrees with ICU's Persian calendar on every day from 1990
+  to 2070.
+- The capital table is computed at the account's own risk per trade, with
+  its formula printed beside it. Its worked example now holds at any risk
+  setting.
+- Demo mode is unchanged.
 
 ### Docs -- a complete, plain-Persian guide to the console
 

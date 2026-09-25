@@ -37,6 +37,13 @@ export interface EquityPoint {
 
 export interface Status {
   ts_ns: number; uptime_sec: number; mode: Mode; venue_mode: VenueMode;
+  /** What the running engine is actually connected to: the simulator, or the
+   *  account type the venue itself reports. Labels follow this; `venue_mode`
+   *  is what the configuration says (and changes before the restart that
+   *  applies it). Absent on servers older than 1.8.2. */
+  venue_effective?: VenueMode;
+  /** simulator · account (reported by the venue) · config (the venue does not say). */
+  venue_source?: "simulator" | "account" | "config";
   halted: boolean; halt_reason: string;
   kill_switch: { engaged: boolean; reason: string; engaged_by?: string };
   cycles: number;
@@ -141,6 +148,31 @@ export interface ExecutionQuality {
   adverse_slippage_share?: number; last_look_asymmetry?: number; last_look_note?: string;
 }
 
+/** The newest stored acceptance verdict, as the Research page reads it.
+ *  Every number is optional: a gate the run did not evaluate has no value,
+ *  and showing a placeholder for it would be a verdict nobody reached. */
+export interface ResearchSummary {
+  run_id: string; strategy: string; created_ns: number; accepted: boolean;
+  data_label: string; summary: string;
+  /** false: the verdict describes a configuration or code that is no longer running. */
+  current_config: boolean | null;
+  effective_trials: number | null;
+  pbo: number | null; pbo_max: number | null;
+  dsr: number | null; min_dsr: number | null; sr: number | null; sr_star: number | null;
+  cpcv_positive_fraction: number | null; cpcv_min_fraction: number | null;
+}
+
+/** Where the monthly table's numbers came from. */
+export interface MonthlyInfo {
+  /** demo: the bundled dataset · ledger: the durable daily equity record ·
+   *  unavailable: the server could not be asked. */
+  source: "demo" | "ledger" | "unavailable";
+  since_ns: number | null;
+  /** Months measured from a reading inside the month, not from the previous month-end. */
+  partial: { year: number; month: number }[];
+  days: number;
+}
+
 export interface Snapshot {
   status: Status; positions: Position[]; trades: Trade[]; equity: EquityPoint[];
   decisions: Decision[]; risk: RiskView; performance: Performance;
@@ -150,8 +182,13 @@ export interface Snapshot {
   advice: Decision[]; health: Record<string, any>;
   costTable: { target: number; raw: number; standard: number }[];
   capitalTable: { stop: number; minEquity: number }[];
+  /** The risk per trade (%) the capital table was computed with. */
+  capitalRiskPct: number;
   cpcvSharpes: number[];
+  /** null: no acceptance run is stored · undefined: it could not be read. */
+  research: ResearchSummary | null | undefined;
   monthly: { year: number; months: (number | null)[] }[];
+  monthlyInfo: MonthlyInfo;
 }
 
 /* ---------------------------------------------------------------------- *
@@ -208,6 +245,7 @@ export interface ProfileCard {
 
 export interface BrokerOverview {
   active_profile: string; active_adapter: string; venue_mode: string;
+  venue_effective?: string; venue_source?: string;
   degradations: string[]; open_positions: number;
   connections: Connection[]; damaged: string[]; profiles: ProfileCard[];
   credential_storage: {

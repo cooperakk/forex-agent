@@ -158,6 +158,8 @@ export default function App() {
   // refused by the demo provider and says so.
   const canAdminister = demo || role === "owner";
   const s = snap.status;
+  // The account actually connected, not the configuration's claim about it.
+  const venue = s.venue_effective ?? s.venue_mode;
 
   return (
     <div className="shell">
@@ -203,7 +205,12 @@ export default function App() {
               {s.halted ? "متوقف شده" : s.kill_switch.engaged ? "توقف اضطراری" : "در حال کار"}
             </Chip>
             <Chip tone="solid">{MODE_FA[s.mode]}</Chip>
-            <Chip tone={s.venue_mode === "live" ? "neg" : "info"}>{VENUE_FA[s.venue_mode]}</Chip>
+            <Chip tone={venue === "live" ? "neg" : "info"}
+                  title={s.venue_source === "account" ? "همان چیزی که خود حساب نزد بروکر گزارش می‌کند"
+                    : s.venue_source === "simulator" ? "بازار ساختگی داخل خود برنامه"
+                    : "بروکر نوع حساب را گزارش نکرد؛ این همان چیزی است که در تنظیمات اعلام شده"}>
+              {VENUE_FA[venue] ?? venue}
+            </Chip>
             <span className="row gap6">
               <span className="fs11 muted nowrap">
                 پول حساب
@@ -269,6 +276,16 @@ export default function App() {
                 {(s.kill_switch.reason || "").includes("heartbeat") && <> «no heartbeat» یعنی موتور
                   ربات مدتی جواب نداده بود؛ اگر روی ویندوز نسخهٔ ۱٫۷٫۰ یا ۱٫۸٫۰ نصب بوده، علتش
                   ایرادی بود که در ۱٫۸٫۱ برطرف شده است.</>}
+              </Banner>
+            </div>
+          )}
+          {venue === "live" && s.venue_mode !== "live" && (
+            <div style={{ marginBottom: 16 }}>
+              <Banner tone="neg" icon="⚠">
+                <strong>حسابی که ربات به آن وصل است با پول واقعی است</strong>، ولی تنظیمات ربات
+                روی حالت تمرینی است. برای ایمنی، ربات به این حساب هیچ سفارشی نمی‌فرستد. اگر
+                قصد تمرین داشتید، در متاتریدر وارد حساب دمو شوید. معامله با پول واقعی فقط بعد
+                از آزمون پذیرش و روشن کردن آگاهانهٔ حالت واقعی ممکن است.
               </Banner>
             </div>
           )}

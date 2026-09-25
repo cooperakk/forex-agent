@@ -625,7 +625,20 @@ export const demoSnapshot: Snapshot = {
       killswitch_file: "var/KILL", log_level: "INFO" },
   },
   advice, health: status.health as Record<string, any>,
-  costTable, capitalTable, cpcvSharpes, monthly,
+  // The demo's reference tables were drawn at 1% risk per trade; the page
+  // says so beside them.
+  costTable, capitalTable, capitalRiskPct: 1, cpcvSharpes, monthly,
+  monthlyInfo: { source: "demo", since_ns: null, partial: [], days: 0 },
+  // The verdict the demo gates above describe, in the shape the live
+  // provider builds from /api/research/latest.
+  research: {
+    run_id: "DEMO-RUN", strategy: "donchian_trend", created_ns: ns(NOW - 3 * 86_400_000),
+    accepted: false, data_label: "synthetic", summary: "", current_config: true,
+    effective_trials: 48, pbo: 0.18, pbo_max: 0.2, dsr: 0.31, min_dsr: 0.95,
+    sr: 0.74, sr_star: 1.19,
+    cpcv_positive_fraction: cpcvSharpes.filter((s) => s > 0).length / cpcvSharpes.length,
+    cpcv_min_fraction: 0.7,
+  },
 };
 
 /* ---------------------------------------------------------------------- *

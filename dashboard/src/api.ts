@@ -11,6 +11,7 @@
  * so plainly rather than showing fabricated data as if it were live.
  */
 import { demoEndpoints, demoSnapshot } from "./demo";
+import { breakEvenTable, capitalTable, researchFromVerdict } from "./derived";
 import type { Decision, Snapshot } from "./types";
 
 export type Provider = {
@@ -49,8 +50,14 @@ export function makeLiveProvider(base: string, token: string): Provider {
   return {
     kind: "live",
     async snapshot() {
+      // Optional reads: a failure here must not blank the whole console, and
+      // must not be mistaken for "nothing stored" either -- `undefined` means
+      // "could not ask", `null` means "asked; there is none".
+      const optional = <T,>(path: string) =>
+        j<T>(`${base}${path}`, token).catch(() => undefined);
       const [status, positions, trades, equity, decisions, risk, performance,
-             lessons, proposals, audit, strategies, execution, config, advice, health] =
+             lessons, proposals, audit, strategies, execution, config, advice, health,
+             latest, monthlyView] =
         await Promise.all([
           j<any>(`${base}/api/status`, token),
           j<any>(`${base}/api/positions`, token),
@@ -67,7 +74,13 @@ export function makeLiveProvider(base: string, token: string): Provider {
           j<any>(`${base}/api/config`, token),
           j<any>(`${base}/api/advice`, token),
           j<any>(`${base}/api/health`, token),
+          optional<{ verdict: any }>("/api/research/latest"),
+          optional<any>("/api/performance/monthly"),
         ]);
+      const research = latest === undefined
+        ? { research: undefined, gates: [], cpcvSharpes: [] }
+        : researchFromVerdict(latest.verdict);
+      const riskPct = Number(config?.risk?.risk_per_trade_pct ?? 0.5);
       return {
         status, positions: positions.positions ?? [], trades: trades.trades ?? [],
         equity: equity.points ?? [], decisions: decisions.decisions ?? [],
@@ -75,11 +88,18 @@ export function makeLiveProvider(base: string, token: string): Provider {
         proposals: proposals.proposals ?? [], audit: audit.records ?? [],
         strategies: strategies.available ?? [], allocations: strategies.allocations ?? {},
         execution, config, advice: advice.pending ?? [], health,
-        // Research artefacts come from a completed acceptance run, not the live
-        // loop; the demo values stand in until one has been stored.
-        gates: demoSnapshot.gates, costTable: demoSnapshot.costTable,
-        capitalTable: demoSnapshot.capitalTable, cpcvSharpes: demoSnapshot.cpcvSharpes,
-        monthly: demoSnapshot.monthly,
+        // Never the demo's numbers. These came from the bundled dataset until
+        // 1.8.2, so a real install showed a made-up acceptance verdict and a
+        // made-up year of monthly returns as the owner's own.
+        gates: research.gates, cpcvSharpes: research.cpcvSharpes,
+        research: research.research,
+        costTable: breakEvenTable(),
+        capitalTable: capitalTable(riskPct), capitalRiskPct: riskPct,
+        monthly: monthlyView?.rows ?? [],
+        monthlyInfo: monthlyView === undefined
+          ? { source: "unavailable", since_ns: null, partial: [], days: 0 }
+          : { source: "ledger", since_ns: monthlyView.since_ns ?? null,
+              partial: monthlyView.partial ?? [], days: monthlyView.days ?? 0 },
       } as Snapshot;
     },
     async get<T>(path: string) {

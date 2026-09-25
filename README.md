@@ -225,6 +225,23 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 
 ## English
 
+### What's new in 1.8.2
+
+* **Activation works for real MetaTrader accounts:** the saved connection
+  test kept the account number masked, and the gate compared the mask with
+  the full number, so «فعال کن» refused every account.
+* **The account-type label tells the truth:** it follows what is running
+  (simulator, or the account type MetaTrader reports), not the
+  configuration. Activation now binds the engine to the verified account.
+* **A non-live configuration never trades a real-money account**, bound or
+  not.
+* **No demo figures on a live install:**
+  - the Research page shows the stored acceptance verdict, or says none has
+    been run;
+  - monthly returns come from a durable daily equity ledger, by Persian
+    month.
+* **Plain-Persian panel guide** with screenshots (`01-PANEL-GUIDE-FA.html`).
+
 ### What's new in 1.8.1
 
 * **Windows fix:** the engine supervisor died a second after start under

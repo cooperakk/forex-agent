@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..agent.orchestrator import Agent, CycleReport
 from ..core.audit import EventType
 from ..core.clock import wall_ns
-from ..core.config import AgentMode, SentinelConfig, diff_configs
+from ..core.config import AgentMode, ExecutionVenueMode, SentinelConfig, diff_configs
 from ..core.money import ZERO, dec
 from ..core.types import OrderState
 from ..research.backtest import _periods_per_year_from_index
@@ -98,6 +98,12 @@ class Runtime:
         self.brain = None        # sentinel.brain.Brain
         self.notifier = None     # sentinel.notify.Notifier
         self.macro = None        # sentinel.data.macro.MacroDesk
+        # One row per Tehran day on disk (ops/equity_ledger). Built on first
+        # use for the same reason as the connection store above.
+        self._equity_ledger = None
+        # The account type the venue reported at the last cycle, for pages
+        # that must not make a venue round trip of their own.
+        self._last_account_type = ""
         self._bg_thread: Optional[threading.Thread] = None
         self.background_errors: List[str] = []
         self.background_last_ns: int = 0
@@ -159,12 +165,15 @@ class Runtime:
                           if self.equity_curve else 0)
 
         secrets = self.secrets
+        venue = self.effective_venue()
         return {
             "active_profile": active_profile,
             "active_adapter": live_name,
             "venue_mode": cfg.execution.venue_mode.value
                           if hasattr(cfg.execution.venue_mode, "value")
                           else str(cfg.execution.venue_mode),
+            "venue_effective": venue["venue"],
+            "venue_source": venue["source"],
             "degradations": degradations,
             "open_positions": open_positions,
             "connections": [c.redacted() for c in conns],
@@ -366,8 +375,8 @@ class Runtime:
         # wrong here: this path has already run every blocker the privileged
         # guard exists to stand in for. Without the exemption the endpoint
         # could never succeed at all -- it returned 409 for every real switch.
-        result = self.update_config({"execution": {"broker": conn.profile}}, by,
-                                    allow_privileged={("execution", "broker")})
+        patch, allow = self._activation_patch(conn)
+        result = self.update_config(patch, by, allow_privileged=allow)
 
         # ONE read-modify-write. Flipping records individually let two
         # concurrent activations each turn off only what their own stale
@@ -378,11 +387,81 @@ class Runtime:
             EventType.CONFIG_CHANGE,
             {"action": "broker_connection_activated", "connection": conn.id,
              "profile": conn.profile}, actor=by)
-        return {**result, "connection": conn.id, "restart_required": True,
-                "note": ("تنظیم ذخیره شد. برای اینکه ربات واقعاً به این بروکر "
-                         "وصل شود باید سرویس یک بار راه‌اندازی دوباره شود — "
-                         "عوض کردن بروکر وسط کار، معامله‌های باز را از دست "
-                         "سامانه خارج می‌کند.")}
+        note = ("تنظیم ذخیره شد. برای اینکه ربات واقعاً به این بروکر "
+                "وصل شود باید سرویس یک بار راه‌اندازی دوباره شود — "
+                "عوض کردن بروکر وسط کار، معامله‌های باز را از دست "
+                "سامانه خارج می‌کند.")
+        if conn.declared_account_type == "live" and \
+                self.agent.config.execution.venue_mode is not ExecutionVenueMode.LIVE:
+            note += (" این حساب «واقعی» اعلام شده ولی تنظیمات ربات روی حالت واقعی نیست؛ "
+                     "تا وقتی حالت واقعی آگاهانه و جداگانه روشن نشود، ربات به این حساب "
+                     "هیچ سفارشی نمی‌فرستد.")
+        return {**result, "connection": conn.id, "restart_required": True, "note": note}
+
+    def _activation_patch(self, conn) -> tuple:
+        """The configuration an activation writes, and the privileged fields it
+        may touch -- all of it applied at the next start.
+
+        Besides the broker profile, activation now binds the engine to the
+        account the probe just verified (number, server, currency), and sets
+        the venue mode for a demo or simulator connection. Before 1.8.2 only
+        the profile changed. The console kept calling an activated Alpari demo
+        «تمرینی — شبیه‌ساز», and the engine traded whichever account the
+        terminal was signed into.
+
+        The venue mode NEVER moves to live on this path. A connection declared
+        live leaves the mode where it is, and the account binding (a
+        non-live mode refuses a real-money account) keeps it from trading until
+        live mode is switched on deliberately, where its own gates are.
+        """
+        execution: Dict[str, Any] = {"broker": conn.profile}
+        live_now = self.agent.config.execution.venue_mode is ExecutionVenueMode.LIVE
+        if conn.adapter == "paper":
+            if not live_now:
+                execution["venue_mode"] = ExecutionVenueMode.PAPER.value
+            execution["expected_account_id"] = ""
+            execution["expected_account_server"] = ""
+        else:
+            if conn.declared_account_type == "demo":
+                # Towards safety only: a demo binding refuses a live account.
+                execution["venue_mode"] = ExecutionVenueMode.DEMO.value
+            if conn.login:
+                from ..brokers.connection import normalise_account_id
+                execution["expected_account_id"] = (
+                    normalise_account_id(conn.login) if conn.adapter == "mt5"
+                    else conn.login.strip())
+                execution["expected_account_server"] = (
+                    conn.server.strip() if conn.adapter == "mt5" else "")
+            # The currency the probe observed, else the one typed in: the
+            # binding compares it on every call, and a cent account ("USC")
+            # bound as USD would refuse to start.
+            observed = str((conn.last_probe or {}).get("account_currency") or "")
+            currency = (observed or conn.account_currency or "").strip().upper()
+            if 3 <= len(currency) <= 5:
+                execution["account_currency"] = currency
+        allow = {("execution", key) for key in execution}
+        return {"execution": execution}, allow
+
+    def effective_venue(self, account=None) -> Dict[str, str]:
+        """What the running engine is actually connected to.
+
+        ``venue_mode`` is what the configuration SAYS, and it changes the
+        moment an activation is saved -- before the restart that applies it.
+        The console's account-type label follows this instead: the simulator
+        when the simulator is running, otherwise the account type the venue
+        itself reports, and the configured mode only when the venue does not
+        say.
+        """
+        configured = self.agent.config.execution.venue_mode.value
+        inner = getattr(self.agent.broker, "inner", self.agent.broker)
+        from ..brokers.paper import PaperBroker
+        if isinstance(inner, PaperBroker):
+            return {"venue": "paper", "source": "simulator", "configured": configured}
+        reported = str(getattr(account, "account_type", "") or "") if account is not None \
+            else self._last_account_type
+        if reported in ("demo", "live"):
+            return {"venue": reported, "source": "account", "configured": configured}
+        return {"venue": configured, "source": "config", "configured": configured}
 
     # -- lifecycle ----------------------------------------------------------- #
 
@@ -529,6 +608,8 @@ class Runtime:
                     open_positions=acct.open_positions))
                 if len(self.equity_curve) > 20000:
                     self.equity_curve = self.equity_curve[-20000:]
+                self._record_equity_day(report.ts_ns, acct)
+                self._last_account_type = str(getattr(acct, "account_type", "") or "")
             except Exception:  # noqa: BLE001
                 pass
             self.cycle_history.append(report.to_dict())
@@ -564,6 +645,7 @@ class Runtime:
     def status(self) -> dict:
         agent = self.agent
         cfg = agent.config
+        acct = None
         try:
             acct = agent.broker.account()
             account = {
@@ -580,11 +662,15 @@ class Runtime:
             account = {"error": str(exc)}
         kill = agent.kill.read()
         caps = agent.broker.capabilities
+        venue = self.effective_venue(acct)
         return {
             "ts_ns": wall_ns(),
             "uptime_sec": round((wall_ns() - self.started_ns) / 1e9, 1) if self.started_ns else 0,
             "mode": cfg.agent.mode.value,
             "venue_mode": cfg.execution.venue_mode.value,
+            # What is actually running; the label follows this (effective_venue).
+            "venue_effective": venue["venue"],
+            "venue_source": venue["source"],
             "halted": agent.halted,
             "halt_reason": agent.halt_reason,
             "kill_switch": kill.to_dict(),
@@ -713,6 +799,29 @@ class Runtime:
         if isinstance(held, list):
             return list(held)
         return list(self._realised)
+
+    @property
+    def equity_ledger(self):
+        if self._equity_ledger is None:
+            from ..ops.equity_ledger import EquityLedger
+            self._equity_ledger = EquityLedger(
+                Path(self.agent.config.ops.state_dir) / "equity-days.db")
+        return self._equity_ledger
+
+    def _record_equity_day(self, ts_ns: int, acct) -> None:
+        """Keep the day's equity on disk. A failure here costs a monthly
+        figure, never a cycle."""
+        try:
+            account = f"{self.agent.config.execution.broker}:{acct.account_id}"
+            self.equity_ledger.record(ts_ns, float(acct.equity), float(acct.balance), account)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"equity ledger: {type(exc).__name__}: {exc}"[:300]
+            if msg not in self.errors[-5:]:
+                self.errors.append(msg)
+                self.errors = self.errors[-50:]
+
+    def monthly_returns(self) -> dict:
+        return self.equity_ledger.monthly()
 
     def performance(self) -> dict:
         import pandas as pd

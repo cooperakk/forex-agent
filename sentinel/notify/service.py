@@ -415,8 +415,11 @@ class Notifier:
             return f"وضعیت خوانده نشد: {exc}"[:200]
         acct = s.get("account") or {}
         from .messages import MODE_FA
-        lines = [f"🤖 حالت: {MODE_FA.get(s.get('mode'), s.get('mode'))} "
-                 f"({'حساب واقعی' if s.get('venue_mode') == 'live' else 'آزمایشی/دمو'})"]
+        # The account actually connected, not only what the configuration says.
+        venue = s.get("venue_effective") or s.get("venue_mode")
+        venue_fa = {"live": "حساب واقعی", "demo": "حساب دمو",
+                    "paper": "شبیه‌ساز"}.get(venue, "آزمایشی/دمو")
+        lines = [f"🤖 حالت: {MODE_FA.get(s.get('mode'), s.get('mode'))} ({venue_fa})"]
         if acct.get("equity") is not None:
             lines.append(f"💰 موجودی: {acct.get('equity')} {acct.get('currency', '')}")
         if s.get("day_pnl") is not None:

@@ -39,7 +39,7 @@ from ..core.config import AgentMode
 from .security import SECURITY_HEADERS, SecurityManager, Session
 from .state import Runtime
 
-API_VERSION = "1.8.1"
+API_VERSION = "1.8.2"
 
 
 class LoginRequest(BaseModel):
@@ -483,6 +483,11 @@ def create_app(runtime: Runtime, security: SecurityManager, *,
     @app.get("/api/performance")
     def get_performance(session: Session = Depends(current_session)):
         return runtime.performance()
+
+    @app.get("/api/performance/monthly")
+    def get_monthly(session: Session = Depends(current_session)):
+        """Monthly returns by Persian month, from the durable daily ledger."""
+        return runtime.monthly_returns()
 
     @app.get("/api/equity")
     def get_equity(limit: int = Query(2000, ge=10, le=20000),

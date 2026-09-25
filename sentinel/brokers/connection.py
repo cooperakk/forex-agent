@@ -296,6 +296,11 @@ def _probe_summary(report: Dict[str, Any]) -> Dict[str, Any]:
         # Kept ONLY in masked form, and only because "which account did this
         # test actually reach" is the question the report exists to answer.
         "account_id": _mask_login(str(account.get("account_id", "") or "")),
+        # What the activation gate compares. The masked number cannot be
+        # compared ("•••••678" is "678" to normalise_account_id), so every
+        # probe of a real account read as "a different account" and no
+        # MetaTrader connection with an account number could be activated.
+        "account_ref": account_fingerprint(str(account.get("account_id", "") or "")),
         "account_currency": str(account.get("currency", "") or ""),
         "account_type": str(account.get("account_type", "") or ""),
     }
@@ -324,6 +329,19 @@ def same_account(a: str, b: str) -> Optional[bool]:
     if not left or not right:
         return None
     return left == right
+
+
+def account_fingerprint(value: str) -> str:
+    """A comparable, non-displayable token for an account number.
+
+    Stored in the probe summary beside the masked number. It is no more
+    revealing than the connection's own ``login`` field in the same file, and
+    unlike the masked form it can be compared for equality."""
+    norm = normalise_account_id(value)
+    if not norm:
+        return ""
+    import hashlib
+    return hashlib.sha256(("sentinel-account:" + norm).encode("utf-8")).hexdigest()[:32]
 
 
 def _mask_login(login: str) -> str:
@@ -1076,6 +1094,24 @@ def _probe_capabilities(broker: Any, conn: BrokerConnection,
 # --------------------------------------------------------------------------- #
 
 
+def _probed_other_account(login: str, probe_data: Dict[str, Any]) -> bool:
+    """Whether the stored probe reached a different account than ``login``.
+
+    Unknown is not a mismatch: a venue that did not report its account id
+    is warned about by the probe itself, not blocked here."""
+    ref = str(probe_data.get("account_ref") or "")
+    if ref:
+        return ref != account_fingerprint(login)
+    probed = str(probe_data.get("account_id") or "")
+    if not probed:
+        return False
+    if "•" in probed:
+        # A summary written before account_ref existed holds only the masked
+        # number: compare it masked, the one comparison it supports.
+        return probed != _mask_login(normalise_account_id(login))
+    return same_account(login, probed) is False
+
+
 def activation_blockers(conn: BrokerConnection, *,
                         open_positions: int,
                         current_broker_name: str = "",
@@ -1127,8 +1163,7 @@ def activation_blockers(conn: BrokerConnection, *,
                 "مشخصات بروکر — مثل حداقل فاصلهٔ حد ضرر — بین جلسات معاملاتی "
                 "عوض می‌شود. یک آزمایش تازه بگیرید.")
         # The probe must have been run against THIS account, not a sibling.
-        probed_login = str(probe_data.get("account_id") or "")
-        if conn.login and same_account(conn.login, probed_login) is False:
+        if conn.login and _probed_other_account(conn.login, probe_data):
             reasons.append(
                 "آزمایشی که ذخیره شده مربوط به حساب دیگری است. یک آزمایش تازه "
                 "روی همین حساب لازم است.")

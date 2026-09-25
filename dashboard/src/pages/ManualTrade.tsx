@@ -42,7 +42,9 @@ export default function ManualTrade({ snap, provider, write, readOnly }: {
   const [confirm, setConfirm] = useState(false);
 
   const s = snap.status;
-  const live = s.venue_mode === "live";
+  // The account actually connected: a real-money account is real money
+  // whatever the configuration claims.
+  const live = (s.venue_effective ?? s.venue_mode) === "live";
   const liveAllowed = !!snap.config?.agent?.manual_trading_live;
   const budget = Number(snap.config?.risk?.risk_per_trade_pct ?? 0.5);
   const decimal = /^[0-9]+(\.[0-9]+)?$/;
