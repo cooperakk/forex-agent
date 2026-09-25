@@ -11,4 +11,6 @@ var/
 !var/.gitkeep
 .env
 *.tar.gz
+# Release packages built by scripts/package.sh (shipped to users, not versioned).
+release-*/
 mt5-check.html
