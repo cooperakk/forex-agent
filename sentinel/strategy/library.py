@@ -31,7 +31,9 @@ from .families.mean_reversion import (
     BollingerFade, PairsSpreadReversion, RSI2Reversion, VolatilityAdjustedReversion,
 )
 from .families.momentum import CrossSectionalMomentum, DualMomentum, TimeSeriesMomentum
-from .families.pattern import EngulfingWithTrend, FailedBreakoutReversal, InsideBarBreak
+from .families.pattern import (
+    EngulfingWithTrend, ExecutionSignals, FailedBreakoutReversal, InsideBarBreak,
+)
 from .families.session import (
     AsianRangeFade, DayOfWeekEffect, LondonOpenMomentum, NewYorkOpenContinuation,
 )
@@ -63,4 +65,5 @@ __all__ = [
     "DayOfWeekEffect",
     # pattern
     "InsideBarBreak", "EngulfingWithTrend", "FailedBreakoutReversal",
+    "ExecutionSignals",
 ]

@@ -240,8 +240,18 @@ def main() -> int:
             print("[acceptance] WARNING: --manifest not supplied; the live-quality label "
                   "cannot be verified by content and gate L10 will fail.")
     else:
-        universe = generate_universe(n_bars=args.n_bars, bars_per_day=6,
+        # Bars of the timeframe the strategy was written for. This was H4
+        # for every strategy, so an H1 or M15 rule was "falsified" on bars it
+        # never runs on -- and an M15 one that refuses coarser bars produced
+        # no trades at all and failed for that reason alone.
+        from sentinel.data.feed import TIMEFRAME_SECONDS
+        from sentinel.strategy.registry import get as get_strategy
+        native = get_strategy(args.strategy).meta.timeframe
+        bars_per_day = max(1, 86400 // TIMEFRAME_SECONDS.get(native, 14400))
+        universe = generate_universe(n_bars=args.n_bars, bars_per_day=bars_per_day,
                                      dollar_factor_strength=0.6)
+        print(f"[acceptance] synthetic {native} bars: {args.n_bars} bars = "
+              f"{args.n_bars / bars_per_day:.0f} days")
         if args.data_label and args.data_label != "synthetic":
             raise SystemExit("synthetic data cannot be labelled anything but synthetic")
         label = "synthetic"
