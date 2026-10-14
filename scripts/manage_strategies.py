@@ -32,11 +32,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sentinel.core.config import SentinelConfig, StrategyAllocation  # noqa: E402
+from sentinel.data.feed import TIMEFRAME_SECONDS  # noqa: E402
 from sentinel.strategy.registry import available, describe_all, get  # noqa: E402
 
-#: The served feed is H4 (bootstrap.build_runtime). A strategy declared on
-#: another timeframe still receives H4 bars, so say so loudly.
-SERVED_TIMEFRAME = "H4"
+# Timeframes. The feed's PRIMARY timeframe is H4 (bootstrap.build_runtime):
+# regime detection, correlation and the protection layer's ATR read it. But
+# each allocation is handed bars of its OWN timeframe -- the feed loads every
+# timeframe an enabled allocation declares, and the paper venue's synthetic
+# market builds its path at the finest of them -- so an allocation should
+# declare the timeframe its strategy was written for. (This file used to say
+# every allocation got H4 bars and defaulted `add` to H4, which put H1 and M15
+# strategies on the wrong bars.)
 
 
 def _load(path: Path) -> SentinelConfig:
@@ -59,8 +65,13 @@ def cmd_list(cfg: SentinelConfig) -> int:
     for a in cfg.strategies:
         flag = "ON " if a.enabled else "off"
         note = ""
-        if a.timeframe != SERVED_TIMEFRAME:
-            note = f"  (declared {a.timeframe}; the served feed is {SERVED_TIMEFRAME})"
+        try:
+            native = get(a.name).meta.timeframe
+        except KeyError:
+            native = a.timeframe
+            note = "  (not in the library)"
+        if a.timeframe != native:
+            note = f"  (strategy written for {native}; allocated on {a.timeframe})"
         print(f"  [{flag}] {a.name:<28} {a.lifecycle:<12} {a.timeframe:<3} "
               f"{','.join(a.instruments)}{note}")
     return 0
@@ -68,13 +79,13 @@ def cmd_list(cfg: SentinelConfig) -> int:
 
 def cmd_available() -> int:
     for d in describe_all():
-        mark = "" if d["timeframe"] == SERVED_TIMEFRAME else f"  (native {d['timeframe']})"
-        print(f"  {d['name']:<28} {d['family']:<15} {d['description'][:60]}{mark}")
+        print(f"  {d['name']:<28} {d['family']:<15} {d['timeframe']:<4} "
+              f"{d['description'][:60]}")
     return 0
 
 
 def cmd_add(cfg: SentinelConfig, name: str, instruments: list[str],
-            timeframe: str, params: dict) -> int:
+            timeframe: str | None, params: dict) -> int:
     if name not in available():
         print(f"error: unknown strategy {name!r}. See: manage_strategies.py available",
               file=sys.stderr)
@@ -89,9 +100,17 @@ def cmd_add(cfg: SentinelConfig, name: str, instruments: list[str],
     except Exception as exc:  # noqa: BLE001
         print(f"error: {name} rejects these parameters: {exc}", file=sys.stderr)
         return 2
-    if timeframe != SERVED_TIMEFRAME:
-        print(f"warning: the served feed is {SERVED_TIMEFRAME}; this allocation will be "
-              f"handed {SERVED_TIMEFRAME} bars whatever it declares.")
+    native = get(name).meta.timeframe
+    timeframe = timeframe or native
+    if timeframe not in TIMEFRAME_SECONDS:
+        print(f"error: unknown timeframe {timeframe!r}; use one of "
+              f"{', '.join(TIMEFRAME_SECONDS)}", file=sys.stderr)
+        return 2
+    if timeframe != native:
+        print(f"warning: {name} was written for {native} bars; this allocation hands it "
+              f"{timeframe} bars, which makes it a different strategy from the one "
+              "described (some strategies refuse to trade on bars they were not "
+              "written for).")
     cfg.strategies.append(StrategyAllocation(
         name=name, enabled=True, instruments=instruments, timeframe=timeframe,
         params=params, lifecycle="hypothesis"))
@@ -133,7 +152,9 @@ def main() -> int:
     a.add_argument("--name", required=True)
     a.add_argument("--instruments", default="EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CHF",
                    help="comma-separated canonical symbols")
-    a.add_argument("--timeframe", default=SERVED_TIMEFRAME)
+    a.add_argument("--timeframe", default=None,
+                   help="bars to hand the strategy; defaults to the timeframe it "
+                        "was written for")
     a.add_argument("--param", action="append", default=[],
                    help="key=value, repeatable; values are parsed as JSON when they can be")
 

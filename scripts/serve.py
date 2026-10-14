@@ -61,8 +61,9 @@ def _default_config_for(cfg_path: Path) -> SentinelConfig:
 
 
 #: The starter set: three H4 systems from different families on the majors.
-#: H4 because the served feed is H4 (see bootstrap.build_runtime); a strategy
-#: declared on another timeframe would be handed the wrong bars.
+#: All three were written for H4, which is also the feed's primary timeframe
+#: (bootstrap.build_runtime), so a fresh install loads one set of bars. Any
+#: allocation may declare another timeframe; the feed loads it as well.
 DEMO_INSTRUMENTS = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CHF"]
 DEMO_ALLOCATIONS = [
     {"name": "donchian_trend", "enabled": True, "instruments": DEMO_INSTRUMENTS,

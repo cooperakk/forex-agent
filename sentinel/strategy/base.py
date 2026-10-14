@@ -488,6 +488,58 @@ def previous_day_extremes(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return day.map(prev_high), day.map(prev_low)
 
 
+#: 17:00 New York: the FX day ends, swap is charged, and spreads are at their
+#: widest of the 24 hours. MetaTrader brokers on "GMT+2/+3" server time put
+#: their midnight here precisely so that a broker's daily and four-hour candles
+#: line up with this roll all year round.
+FX_ROLLOVER_NY_MINUTE = 17 * 60
+
+
+def new_york_clock(index: pd.DatetimeIndex) -> pd.DataFrame:
+    """The New York wall clock at each timestamp, and the FX trading day.
+
+    Columns:
+
+    * ``ny_minute`` -- minutes after New York midnight;
+    * ``ny_day`` -- the New York calendar date, as days since 1970-01-01;
+    * ``ny_weekday`` -- Monday=0 .. Sunday=6 of that date;
+    * ``fx_day`` -- the FX trading day the timestamp belongs to, as days since
+      1970-01-01. It starts at the 17:00 New York roll, so Sunday evening is
+      already Monday and there are five trading days a week, not six.
+
+    A pure function of each timestamp, so causal by construction. DST comes
+    from ``core.tzrules`` rather than ``zoneinfo``, for the reason that module
+    gives: the same answer on every machine, tzdata or not. Each UTC instant is
+    compared with the two US switch instants of its year, which is exact in the
+    changeover hour too. Before 2007 the US used different dates and these
+    rules are an hour out for a few weeks a year (see ``core.tzrules``).
+    """
+    from ..core.tzrules import us_dst_bounds_utc
+
+    idx = pd.DatetimeIndex(index)
+    utc = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    naive = utc.tz_localize(None)
+    years = np.asarray(naive.year, dtype=np.int64)
+    known = np.unique(years)
+    switch = [us_dst_bounds_utc(int(y)) for y in known]
+    starts = np.array([pd.Timestamp(s).value for s, _ in switch], dtype=np.int64)
+    ends = np.array([pd.Timestamp(e).value for _, e in switch], dtype=np.int64)
+    at = np.searchsorted(known, years)
+    t_ns = naive.as_unit("ns").asi8
+    summer = (t_ns >= starts[at]) & (t_ns < ends[at])
+    local = naive + pd.to_timedelta(np.where(summer, -4, -5), unit="h")
+    epoch = pd.Timestamp("1970-01-01")
+    ny_day = (local.normalize() - epoch).days
+    fx_day = ((local + pd.Timedelta(minutes=1440 - FX_ROLLOVER_NY_MINUTE)).normalize()
+              - epoch).days
+    return pd.DataFrame({
+        "ny_minute": (local.hour * 60 + local.minute).astype(np.int64),
+        "ny_day": np.asarray(ny_day, dtype=np.int64),
+        "ny_weekday": local.dayofweek.astype(np.int64),
+        "fx_day": np.asarray(fx_day, dtype=np.int64),
+    }, index=index)
+
+
 def session_key(index: pd.DatetimeIndex) -> pd.Series:
     """A distinct label per (calendar day, session), for grouping intraday bars.
 

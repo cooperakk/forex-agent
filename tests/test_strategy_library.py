@@ -52,15 +52,43 @@ N_BARS = 700
 CANDIDATES = sorted(n for n in R.available() if not n.startswith("baseline_"))
 
 
-@pytest.fixture(scope="module")
-def universe():
+#: Strategies declared on bars finer than an hour are tested on bars of THEIR
+#: timeframe. Handed hourly bars, an M15 strategy refuses to trade (it would be
+#: a different strategy) and every test below would pass on silence. Hourly
+#: and coarser strategies keep the shared hourly universe they were written
+#: against. 2,000 M15 bars is three weeks: enough warm-up for an H1 signal
+#: timeframe and room for the causality checks.
+INTRADAY_BARS = 2000
+
+
+def _universe(bars_per_day: int, n_bars: int):
     # A dollar factor strong enough to give the majors realistic pairwise
     # correlations (0.6-0.8, which is where EUR/USD and GBP/USD actually live).
     # Below that the spread strategy never sees a co-moving pair and its tests
     # would pass having generated nothing.
-    u = generate_universe(n_bars=N_BARS, bars_per_day=24, seed=424242,
+    u = generate_universe(n_bars=n_bars, bars_per_day=bars_per_day, seed=424242,
                           dollar_factor_strength=0.7)
     return {k: v for k, v in u.items() if k in INSTRUMENTS}
+
+
+_UNIVERSES: dict = {}
+
+
+def universe_for(name: str):
+    """The bars a strategy is tested on: hourly, or its own intraday timeframe."""
+    from sentinel.data.feed import TIMEFRAME_SECONDS
+
+    seconds = TIMEFRAME_SECONDS.get(R.get(name).meta.timeframe, 3600)
+    key = seconds if seconds < 3600 else 3600
+    if key not in _UNIVERSES:
+        _UNIVERSES[key] = (_universe(86400 // key, INTRADAY_BARS) if key < 3600
+                           else _universe(24, N_BARS))
+    return _UNIVERSES[key]
+
+
+@pytest.fixture
+def universe(name):
+    return universe_for(name)
 
 
 def _signal_fingerprint(sig):
@@ -135,7 +163,8 @@ class TestEveryStrategy:
         full = R.build(name)
         full.prepare(universe)
         checks = 0
-        for index in range(N_BARS - 250, N_BARS - 10, 40):
+        n_bars = len(next(iter(universe.values())))
+        for index in range(n_bars - 250, n_bars - 10, 40):
             truncated_data = {s: df.iloc[: index + 1] for s, df in universe.items()}
             truncated = R.build(name)
             truncated.prepare(truncated_data)

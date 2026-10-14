@@ -49,6 +49,17 @@ def generate_series(
     factor_loading: float = 0.0,
     start: str = "2022-01-03",
 ) -> pd.DataFrame:
+    # Bars are laid on a grid of whole MINUTES, not whole hours. The grid used
+    # to be ``f"{24 // bars_per_day}h"``, which is "0h" for anything finer than
+    # an hour: a step of zero, and a ValueError. The paper venue's market
+    # driver builds its path at the finest timeframe any enabled allocation
+    # declares, so one M15 strategy switched on made every tick raise -- and
+    # the H4 strategies beside it, which share the same path, stopped
+    # receiving bars too. The agent then looked healthy and said nothing.
+    if bars_per_day <= 0 or 1440 % bars_per_day:
+        raise ValueError(f"bars_per_day={bars_per_day} does not divide a day into whole "
+                         "minutes; use 1, 6, 24, 48, 96, 288 or 1440")
+    step_min = 1440 // bars_per_day
     rng = np.random.default_rng(seed)
     bars_per_year = bars_per_day * 252
     base_sigma = spec.annual_vol / np.sqrt(bars_per_year)
@@ -84,10 +95,13 @@ def generate_series(
         regimes[t] = "trend" if trending else "range"
 
     price = spec.start_price * np.exp(np.cumsum(logret))
-    index = pd.date_range(start, periods=n_bars, freq=f"{24 // bars_per_day}h", tz="UTC")
+    index = pd.date_range(start, periods=n_bars, freq=pd.Timedelta(minutes=step_min),
+                          tz="UTC")
 
     # Weekend gap: Friday close to Monday open jumps without intervening prices.
-    is_monday_open = (index.dayofweek == 0) & (index.hour < 24 // bars_per_day)
+    # The first bar of Monday, whatever the bar size (identical to the old
+    # hour test for every timeframe that test could express).
+    is_monday_open = (index.dayofweek == 0) & (index.hour * 60 + index.minute < step_min)
     gap = np.where(is_monday_open, rng.normal(0, base_sigma * 2.2, n_bars), 0.0)
     price = price * np.exp(np.cumsum(gap))
 

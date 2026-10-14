@@ -91,6 +91,21 @@ def _us_dst(moment: dt.datetime) -> bool:
     return moment.hour < 2
 
 
+def us_dst_bounds_utc(year: int) -> tuple[dt.datetime, dt.datetime]:
+    """The two US switch INSTANTS of ``year``, as naive UTC datetimes.
+
+    Summer time starts at 02:00 EST on the second Sunday in March (07:00 UTC)
+    and ends at 02:00 EDT on the first Sunday in November (06:00 UTC). Testing
+    a UTC instant against these two is exact everywhere, the changeover hour
+    included -- which the local-wall-clock test in ``_us_dst`` cannot be, since
+    one local hour does not exist and another happens twice.
+    """
+    start = _nth_weekday(year, 3, 6, 2)
+    end = _nth_weekday(year, 11, 6, 1)
+    return (dt.datetime(start.year, start.month, start.day, 7),
+            dt.datetime(end.year, end.month, end.day, 6))
+
+
 def _eu_dst(moment: dt.datetime) -> bool:
     """European summer time: last Sunday in March to last Sunday in October,
     both at 01:00 UTC -- the whole Union switches at the same *instant*, not at

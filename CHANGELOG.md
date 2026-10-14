@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.9.0 -- 2026-10-04
+
+### Added -- `execution_signals`: Execution Signals v10.5, adapted to FX
+
+- A new hypothesis in the pattern family, from the owner's "Execution
+  Signals v10.5" paper (a TradingView strategy for MNQ futures on 5m
+  signals and 1m execution). Off by default; it never trades real money
+  until it passes acceptance, like every strategy.
+- **What it does.**
+  - It arms on a completed H1 inside bar (optionally a failure bar).
+  - It enters on the first M15 close beyond that bar's range.
+  - The stop is behind the prior bar, the target is 3R, and it is flat by
+    15:59 New York.
+  - No new entries from 15:59 to 18:00 New York, which brackets the FX
+    17:00 roll.
+  - Optional prior-day high/low filter.
+  - The paper's second mode ("LTF Signal Bar") is a parameter.
+- **What was changed for FX, and why** (`docs/EXECUTION-SIGNALS-FA.md`):
+  - 1m/5m becomes M15/H1, because a one-minute stop is inside the cost
+    barrier.
+  - The paper's sizing (`min(30, floor(1500 / (ATR * $2)))` contracts,
+    unrelated to the account or the stop, and one contract when the ATR is
+    missing) is removed. The risk engine sizes it like every strategy.
+  - The minimum stop is 10 pips and 0.10% of price. At the default 0.5%
+    risk, a tighter stop is one position above the 5x gross-leverage cap,
+    which the engine refuses.
+  - H4/D1 signal bars are anchored on the 17:00 New York roll, like a
+    GMT+2/+3 MetaTrader chart.
+  - The flat time travels as each signal's own horizon.
+- **The paper's literal reading is the default.** Its pseudo-code disarms
+  the setup after the first execution bar (`trigger_window="first_bar"`);
+  `"period"` is the reading its reset line implies. Both are parameters.
+- **What it does not have: evidence.** The paper's two trades say nothing
+  (95% interval for the win rate: 16% to 100%).
+  - The full acceptance protocol on synthetic M15 data runs end to end
+    (55 trades, 0 errors, worst drawdown 7.3%) and finds no edge, as it
+    must on data without one.
+  - The production agent loop (agent replay) trades it cleanly.
+  - The test that matters is `run_acceptance.py` on the broker's own M15
+    history; the guide gives the commands.
+- `new_york_clock()` in the strategy toolkit: New York minute, date and FX
+  trading day. Exact against the tz database (2008-2027, every changeover
+  hour included). `core.tzrules.us_dst_bounds_utc()` gives the two US
+  switch instants of a year.
+
+### Fixed -- one M15 strategy blanked the whole paper market
+
+- The synthetic generator laid bars on a grid of whole hours
+  (`f"{24 // bars_per_day}h"`), which is a zero step below one hour.
+- The paper venue's market driver builds its path at the finest timeframe
+  any enabled allocation declares. So switching on any sub-hourly strategy
+  (the library already had one, `opening_range_break`) made every tick
+  raise.
+- The H4 strategies beside it stopped receiving bars too. The agent looked
+  healthy and produced nothing.
+- Bars are now laid on whole minutes. Output for H1 and coarser is
+  byte-identical to before.
+
+### Fixed -- the strategy tooling put strategies on the wrong bars
+
+- `manage_strategies.py` told the operator that every allocation receives
+  H4 bars, which stopped being true when allocations got their own
+  timeframes. `add` also defaulted to H4, so an H1 or M15 strategy was
+  silently allocated on four-hour bars.
+- It now defaults to the timeframe the strategy was written for, and names
+  any other choice.
+- `run_acceptance.py` built its synthetic universe on H4 for every strategy.
+  It now uses the strategy's own timeframe.
+- The strategy-library tests hand each sub-hourly strategy bars of its own
+  timeframe, so `opening_range_break` and `execution_signals` are no longer
+  checked on bars they would refuse.
+- A comment in `inside_bar_break` described the mother bar's range; the code
+  has always broken the previous bar's. The comment now says what the code
+  does.
+
 ## 1.8.2 -- 2026-09-25
 
 ### Fixed -- no MetaTrader account with an account number could be activated

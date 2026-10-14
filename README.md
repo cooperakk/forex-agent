@@ -225,6 +225,21 @@ sudo -u sentinel touch /var/lib/sentinel/var/KILL
 
 ## English
 
+### What's new in 1.9.0
+
+* **New strategy `execution_signals`:** the owner's "Execution Signals v10.5"
+  (MNQ futures, 5m/1m) rebuilt for FX.
+  - It finds an H1 inside bar, enters on the M15 close beyond it, aims for
+    3R, and is flat by 15:59 New York.
+  - The paper's contract sizing is replaced by the risk engine.
+  - It is a hypothesis, off by default.
+  - Persian assessment and how to test it on your own MT5 history:
+    `02-EXECUTION-SIGNALS-FA.html`.
+* **Fix:** switching on any M15 strategy in simulator mode silently stopped
+  the whole synthetic market, so the H4 strategies went quiet too.
+* **Fix:** `manage_strategies.py add` allocated every strategy on H4 bars;
+  it now uses the strategy's own timeframe.
+
 ### What's new in 1.8.2
 
 * **Activation works for real MetaTrader accounts:** the saved connection
