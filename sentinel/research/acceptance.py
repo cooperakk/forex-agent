@@ -6,16 +6,30 @@ the verdict, so nobody can discover a threshold after seeing the result.
 
 The gates, in the order the research brief puts them -- cheapest failure first:
 
-  L0  environment      cost arithmetic, capital granularity, venue capability
-  L1  baselines        beat no-trade, coin-flip and buy-and-hold on the same data
-  L2  random walk      Clark-West against "tomorrow = today"
-  L3  factor alpha     significant after the dollar and carry controls
-  L4  overfitting      PBO below the ceiling
-  L5  multiple testing SPA / deflated Sharpe over every variant tried
-  L6  stability        positive on a declared fraction of CPCV paths
-  L7  stress           still positive at 2x cost and 2x latency
-  L8  drawdown         worst CPCV path inside the pre-declared ceiling
-  L9  power            history at least the computed MinTRL
+  L0.1-0.6 environment   cost arithmetic, capital granularity, venue idempotency
+                         and venue-side stop (``environment_gates``); uptime and
+                         a completed deposit-to-withdrawal cycle (operational)
+  L1   baselines         beat no-trade, coin-flip and buy-and-hold on the same data
+  L2   random walk       the rule's OWN calls: mean signed return over its horizon,
+                         Newey-West errors, on every signal raised (not Clark-West
+                         on equity returns, which an earlier version ran and
+                         which compares two things neither of which is a forecast)
+  L3   factor alpha      significant after the dollar, carry and momentum controls
+  L4   overfitting       PBO below the ceiling
+  L5.1 multiple testing  deflated Sharpe over the effective trial count
+  L5.2                   Hansen SPA across the variant family
+  L6   stability         positive on a declared fraction of CPCV paths
+  L7   stress            still positive at 2x cost and 2x latency
+  L8   drawdown          worst CPCV path inside the pre-declared ceiling
+  L9   power             history at least the computed MinTRL
+  L10  data              live-quality: venue bid/ask, file hashes, full cost schedule
+  L11  shared runtime    the production Agent/OMS/risk loop (agent replay) at
+                         production cadence, not a re-implementation
+  L12  forward           >= FORWARD_MIN_TRADES closed trades under this exact
+                         configuration fingerprint, net positive, inside the ceiling
+  L13  integrity         >= 30 trades, no strategy exceptions, no halt
+
+Every gate appears in every verdict; one whose evidence was not supplied fails.
 
 A failure at any gate is a *result*, and it is recorded with the same weight as
 a pass. The point of the protocol is to make it cheap to discover that

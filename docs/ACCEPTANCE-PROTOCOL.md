@@ -83,7 +83,10 @@ risks, not footnotes.
 | **L7** | Stress | survives 2× costs **and** 2× latency |
 | **L8** | Drawdown ceiling | worst drawdown ≤ the configured ceiling |
 | **L9** | Statistical power | `n_obs ≥ MinTRL` — enough observations for the observed Sharpe to be distinguishable from luck |
-| **L10** | Data provenance | live-quality broker data, not synthetic or vendor-reconstructed |
+| **L10** | Verified data and costs | `live-quality`: the venue's own bid/ask OHLC, file hashes checked against a manifest, and a complete cost schedule |
+| **L11** | Shared runtime | the production Agent/OMS/risk loop itself (`--engine agent`), driven by execution bars no coarser than the decision interval, with the news calendar replayed or disabled |
+| **L12** | Forward validation | ≥ 50 closed demo or live trades under **this** configuration fingerprint, net positive, drawdown inside the ceiling, reconciled against the account |
+| **L13** | Generation integrity | ≥ 30 trades, no strategy exceptions, no halt during the run |
 
 A note on each of the ones that are commonly skipped elsewhere:
 
@@ -161,6 +164,25 @@ measure selection, and it purges nothing, because nothing was selected.) A
 family that collapses to one distinct configuration is reported as such and
 L6 is marked *not evaluated*, which is a failure.
 
+**L10 (verified data).** A label is a claim; the manifest is the proof. The
+files are hashed, every one must carry bid and ask, and the cost schedule
+(commission, slippage, both swap tables) must be complete. Synthetic or
+third-party mid prices can falsify a strategy but can never accept one.
+
+**L11 (shared runtime).** The rules harness (`--engine rules`) re-implements
+the agent's rules for speed. That is fine for exploring and wrong for
+accepting: it validates a program that never runs. L11 passes only on the
+agent replay (`research/replay.py`) at production cadence.
+
+**L12 (forward).** The only gate that touches a real venue's fills, spreads
+and rejections. The forward record must carry the same configuration
+fingerprint as the verdict -- a different parameter, instrument set or runtime
+policy is a different strategy.
+
+**L13 (integrity).** A run in which the strategy raised on some bars, or the
+agent halted, produced statistics about a different run than the one that
+would trade.
+
 **L9 (MinTRL).** Minimum track record length. A Sharpe of 1.2 over 40 trades
 is not evidence.
 
@@ -179,12 +201,27 @@ is not evidence.
 5. Runs **combinatorial purged CV** over that family's return matrix.
 6. Applies Benjamini–Hochberg across the gate p-values.
 7. Records a verdict in `var/verdicts.db`, bound to
-   `config_fingerprint(instruments, params, timeframe)`.
+   `config_fingerprint(instruments, params, timeframe)` plus the trading-path
+   source hash and the runtime policy.
+
+Synthetic data is generated on the strategy's own timeframe (an M15 strategy
+gets M15 bars). The flags that turn a run into evidence:
+
+| flag | what it supplies | gate |
+|---|---|---|
+| `--bars DIR` | one CSV per instrument, exported with `scripts/export_history.py` | all |
+| `--data-label live-quality` + `--manifest FILE` | the provenance claim and its proof (`scripts/make_manifest.py`) | L10 |
+| `--engine agent` (default) + `--execution-bars DIR` | the production loop, driven by finer bars | L11 |
+| `--news FILE` | the dated release calendar, replayed at the simulated clock | L11 |
+| `--forward FILE` | the verified forward record of this configuration | L12 |
+| `--venue-probe FILE`, `--broker NAME` | the account's measured equity, round-trip cost and capabilities, and the profile's declaration | L0.1–L0.4 |
+| `--declared-trials N` | search the ledger cannot see | L5.1 |
+| `--meta-label` / `--save-meta FILE` | a meta-label filter fitted on the first 60 %, judged on the rest | all |
 
 It prints a per-gate table with the observed value, the threshold, and the
 reason the gate exists.
 
-**The gate list is fixed.** Every gate in L1–L10 appears in every verdict. A
+**The gate list is fixed.** Every gate from L0.1 to L13 appears in every verdict. A
 gate whose evidence was not supplied — no baselines, no variant matrix, no
 stress run — is recorded as *not evaluated* and **fails**. An earlier version
 only evaluated gates whose inputs happened to be present, so a verdict built
@@ -204,18 +241,28 @@ measurement; the verdict records which profile it was evaluated for.
 
 ### The shipped demo fails, on purpose
 
+`run_acceptance.py --strategy donchian_trend --engine rules` on the synthetic
+universe (1.9.0):
+
 ```
-L2   beats a random walk .................. FAIL
-L3   alpha after factor controls .......... FAIL
-L4   backtest overfitting ................. FAIL
-L5.2 superior predictive ability .......... FAIL
-L9   statistical power .................... FAIL
-L10  data provenance ...................... FAIL
-VERDICT: NOT ACCEPTED
+[PASS] L0.1-L0.4, L1, L2, L6, L7, L8, L13
+[FAIL] L3    alpha after factor controls     alpha t = -0.92
+[FAIL] L4    backtest overfitting            PBO = 0.86
+[FAIL] L5.1  deflated Sharpe                 DSR = 0.550
+[FAIL] L5.2  superior predictive ability     SPA p = 0.38
+[FAIL] L9    statistical power               2999 observations, need 23839
+[FAIL] L10   verified data and costs         synthetic (cannot promote)
+[FAIL] L11   shared runtime                  rules-harness
+[FAIL] L12   forward validation              no verified forward record
+NOT ACCEPTED
 ```
 
 `donchian_trend` on synthetic data does not pass. This is the correct result
-and it is left in place deliberately. A system that ships with a passing
+and it is left in place deliberately. Note what it DOES pass: the synthetic
+market has trending regimes built in, so a trend follower beats the baselines
+and calls direction well (L1, L2) -- and the overfitting and multiple-testing
+gates still show the result is not distinguishable from the best of a search.
+Passing several gates is not half an acceptance. A system that ships with a passing
 verdict has either found something extraordinary or is lying to you, and the
 second is overwhelmingly more likely.
 
